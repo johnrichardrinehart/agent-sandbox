@@ -89,9 +89,16 @@ the host, this needs wheel membership and `sudo` authorization. The
 `systemd-nspawn` application also needs `sudo`. These operations are isolated
 from the package build, but they are not fully unprivileged host operations.
 
-Nix itself is strongest on Linux for this project. The flake declares
-Linux systems because the service uses Linux containers, Bubblewrap, Docker,
-and NixOS VM tests.
+The flake supports Linux and Apple Silicon macOS. On macOS, it provides native
+development tools and static checks. Its package set mirrors the
+`aarch64-linux` package set because the service, container image,
+`systemd-nspawn` application, and NixOS VM test need Linux. A macOS host must
+configure an `aarch64-linux` builder before it builds these packages. The
+standard VM test command then sends the build to that builder:
+
+```console
+nix build .#nixos-vm-test -L
+```
 
 ### Reproducibility is not absolute
 

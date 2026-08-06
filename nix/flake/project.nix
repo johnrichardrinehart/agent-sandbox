@@ -1,4 +1,7 @@
-_: {
+{ config, ... }:
+{
+  flake.packages.aarch64-darwin = config.flake.packages.aarch64-linux;
+
   perSystem =
     { pkgs, ... }:
     let
@@ -548,7 +551,7 @@ _: {
       };
     in
     {
-      packages = {
+      packages = lib.optionalAttrs pkgs.stdenv.isLinux {
         default = agent;
         agent-sandbox = agent;
         agent-image = agentImage;
@@ -562,10 +565,6 @@ _: {
       };
 
       apps = {
-        agent-systemd-nspawn = {
-          program = lib.getExe nspawnApp;
-          meta.description = "Run agent-sandbox in an ephemeral systemd-nspawn unit";
-        };
         exercise-image = {
           program = lib.getExe exerciseImage;
           meta.description = "Exercise a running agent sandbox OCI image";
@@ -574,6 +573,12 @@ _: {
           program = lib.getExe publishImage;
           meta.description = "Publish and verify the agent sandbox OCI image";
         };
+      }
+      // lib.optionalAttrs pkgs.stdenv.isLinux {
+        agent-systemd-nspawn = {
+          program = lib.getExe nspawnApp;
+          meta.description = "Run agent-sandbox in an ephemeral systemd-nspawn unit";
+        };
       };
 
       # Consumer outputs are mirrored into the development partition's checks.
@@ -581,15 +586,19 @@ _: {
       # inputs in the image or package closure.
       _module.args.agentSandboxChecks = {
         inherit
-          agentImage
-          agentRootfs
           clippyCheck
           composeCheck
           exerciseImage
-          nspawnApp
           publishImage
           scriptShebangCheck
           sourcehutManifestCheck
+          ;
+      }
+      // lib.optionalAttrs pkgs.stdenv.isLinux {
+        inherit
+          agentImage
+          agentRootfs
+          nspawnApp
           ;
         agentPackage = agent;
       };

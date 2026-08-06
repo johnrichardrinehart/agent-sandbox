@@ -13,6 +13,8 @@
       ...
     }:
     let
+      inherit (pkgs) lib;
+
       runDockerDaemon = pkgs.writeShellApplication {
         name = "agent-dockerd-runner";
         runtimeInputs = [
@@ -289,12 +291,18 @@
       };
 
       checks = {
+        cargo-clippy = agentSandboxChecks.clippyCheck;
+        compose = agentSandboxChecks.composeCheck;
+        exercise-image = agentSandboxChecks.exerciseImage;
+        publish-image = agentSandboxChecks.publishImage;
+        script-shebangs = agentSandboxChecks.scriptShebangCheck;
+        sourcehut-manifest = agentSandboxChecks.sourcehutManifestCheck;
+      }
+      // lib.optionalAttrs pkgs.stdenv.isLinux {
         agent-sandbox = agentSandboxChecks.agentPackage;
         agent-image = agentSandboxChecks.agentImage;
         agent-rootfs = agentSandboxChecks.agentRootfs;
         agent-systemd-nspawn = agentSandboxChecks.nspawnApp;
-        cargo-clippy = agentSandboxChecks.clippyCheck;
-        compose = agentSandboxChecks.composeCheck;
         docker-detachment = pkgs.runCommand "agent-sandbox-docker-detachment-check" { } ''
           daemon=${startDockerDaemon}/bin/agent-docker-daemon
           runner=${runDockerDaemon}/bin/agent-dockerd-runner
@@ -315,28 +323,28 @@
           test "$(grep --count --fixed-strings 'unmount_tree "$data_dir"' "$runner")" -eq 2
           touch "$out"
         '';
-        exercise-image = agentSandboxChecks.exerciseImage;
-        publish-image = agentSandboxChecks.publishImage;
-        script-shebangs = agentSandboxChecks.scriptShebangCheck;
-        sourcehut-manifest = agentSandboxChecks.sourcehutManifestCheck;
       };
 
       devShells.default = pkgs.mkShell {
         packages = [
-          startDockerDaemon
           pkgs.cargo
           pkgs.clippy
-          pkgs.docker-client
           pkgs.grpcurl
           pkgs.nixd
-          pkgs.podman
-          pkgs.podman-compose
           pkgs.protobuf
           pkgs.rustc
           pkgs.rustfmt
+        ]
+        ++ lib.optionals pkgs.stdenv.isLinux [
+          startDockerDaemon
+          pkgs.docker-client
+          pkgs.podman
+          pkgs.podman-compose
         ];
         shellHook = ''
           ${config.pre-commit.installationScript}
+        ''
+        + lib.optionalString pkgs.stdenv.isLinux ''
           export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
           docker_owner_pid="''${AGENT_SANDBOX_DIRENV_OWNER_PID:-$$}"
           docker_watch_cwd="''${AGENT_SANDBOX_DIRENV_ACTIVE:-0}"
