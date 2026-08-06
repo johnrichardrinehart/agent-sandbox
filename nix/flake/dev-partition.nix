@@ -18,6 +18,7 @@
         runtimeInputs = [
           pkgs.coreutils
           pkgs.docker
+          pkgs.iproute2
         ];
         text = ''
           owner_pid=$1
@@ -28,13 +29,16 @@
           daemon_dir="/run/user/$uid/agent-sandbox-docker-$owner_pid"
           pidfile="$daemon_dir/dockerd.pid"
           bridge="asd-$owner_pid"
-          bridge_subnet="10.254.$((owner_pid % 200 + 20)).1/24"
+          bridge_octet=$((owner_pid % 200 + 20))
+          bridge_address="10.254.$bridge_octet.1/24"
+          bridge_cidr="10.254.$bridge_octet.0/24"
 
           cleanup() {
             if [[ -n "''${daemon_pid:-}" ]]; then
               kill "$daemon_pid" 2>/dev/null || true
               wait "$daemon_pid" 2>/dev/null || true
             fi
+            ip link delete "$bridge" 2>/dev/null || true
             rm -rf "$daemon_dir"
           }
           trap cleanup EXIT INT TERM
@@ -42,9 +46,13 @@
           install -d -m 0750 -o root -g "$gid" "$daemon_dir"
           printf '%s\n' "$$" >"$daemon_dir/runner.pid"
 
+          ip link add name "$bridge" type bridge
+          ip address add "$bridge_address" dev "$bridge"
+          ip link set "$bridge" up
+
           dockerd \
-            --bip "$bridge_subnet" \
             --bridge "$bridge" \
+            --fixed-cidr "$bridge_cidr" \
             --data-root "$daemon_dir/data" \
             --exec-root "$daemon_dir/exec" \
             --group "$gid" \
