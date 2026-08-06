@@ -45,7 +45,19 @@ podman-compose down
 
 Both images run as `sandbox-manager`, use `/home/user` as the home and working directory, preinstall every library listed in `requirements.txt`, and start `agent-sandbox` as their entrypoint. Compose references `ghcr.io/johnrichardrinehart/agent-sandbox:latest`; `--build` replaces it locally with the compatibility Dockerfile build.
 
-Pushes to `main` publish the Nix-built image to GHCR as `latest` and `0.0.n`, where `n` is the commit count on `main`. Other branches run checks but cannot publish an image.
+## Continuous integration
+
+GitHub Actions remains a check-only adapter. SourceHut runs the same `nix flake check --print-build-logs` contract from [`.build.yml`](.build.yml), builds the Nix OCI archive, and publishes only `refs/heads/main` to GHCR. Other SourceHut branches build and test the image but cannot publish it.
+
+The SourceHut repository is the registered private mirror at `git.sr.ht/~fuzzybear3965/agent-sandbox`. A push containing `.build.yml` submits a build automatically. The manifest uses the existing SourceHut CI SSH-key secret to clone this private repository.
+
+### GHCR secret
+
+Create a GitHub personal access token (classic) for `johnrichardrinehart` at <https://github.com/settings/tokens/new?scopes=write:packages>. This URL avoids the GitHub token form's default addition of the broad `repo` scope. Keep only `write:packages`, which includes image download and upload; do not add `repo`, `workflow`, or `delete:packages`.
+
+The SourceHut file secret declared in `.build.yml` is mounted at `~/.ghcr_pat`; its complete contents are the token. SourceHut runs tasks with shell tracing enabled, so the publishing app reads the file with tracing disabled and passes the token to `skopeo login` through standard input.
+
+A main build publishes `ghcr.io/johnrichardrinehart/agent-sandbox:latest` and `0.0.n`, where `n` is the main commit count, then confirms that both tags have the same digest. GHCR makes a new personal package private by default. After its first publication, change the package visibility to public in its GitHub package settings so the documented Compose command can pull it without authentication.
 
 ## Run with systemd-nspawn
 

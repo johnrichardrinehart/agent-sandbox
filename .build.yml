@@ -1,0 +1,35 @@
+image: nixos/unstable
+
+secrets:
+  - 3a60ba67-89eb-49e6-a818-f4d28848de74 # git.sr.ht clone SSH key
+  - 6e416072-c83c-4b52-b040-42396f7d2b74 # ~/.ghcr_pat
+
+environment:
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+
+sources:
+  - git@git.sr.ht:~fuzzybear3965/agent-sandbox
+
+tasks:
+  - check: |
+      cd agent-sandbox
+      nix flake check --print-build-logs
+
+  - build-image: |
+      cd agent-sandbox
+      nix build .#agent-image --out-link "$HOME/agent-image"
+
+  - publish-image: |
+      if [ "${GIT_REF:-}" != refs/heads/main ]; then
+        echo "Skipping GHCR publication for ${GIT_REF:-unknown ref}"
+        exit 0
+      fi
+
+      cd agent-sandbox
+      version="0.0.$(git rev-list --count HEAD)"
+      set +x
+      nix run .#publish-image -- "$HOME/agent-image" "$version"
+
+submitter:
+  git.sr.ht:
+    enabled: true

@@ -121,6 +121,8 @@
         agent-systemd-nspawn = agentSandboxChecks.nspawnApp;
         cargo-clippy = agentSandboxChecks.clippyCheck;
         compose = agentSandboxChecks.composeCheck;
+        publish-image = agentSandboxChecks.publishImage;
+        sourcehut-manifest = agentSandboxChecks.sourcehutManifestCheck;
       };
 
       devShells.default = pkgs.mkShell {

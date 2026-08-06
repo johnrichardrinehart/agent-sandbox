@@ -91,6 +91,15 @@ _: {
         };
       };
 
+      publishImage = pkgs.writeShellApplication {
+        name = "publish-image";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.skopeo
+        ];
+        text = builtins.readFile ../../scripts/publish-image.sh;
+      };
+
       nspawnApp = pkgs.writeShellApplication {
         name = "agent-systemd-nspawn";
         runtimeInputs = [ pkgs.systemd ];
@@ -148,6 +157,28 @@ _: {
         '';
       };
 
+      sourcehutManifestCheck =
+        pkgs.runCommand "agent-sandbox-sourcehut-manifest-check"
+          {
+            nativeBuildInputs = [
+              pkgs.jq
+              pkgs.yq-go
+            ];
+          }
+          ''
+            yq --output-format=json '.' ${../../.build.yml} | jq --exit-status '
+              .image == "nixos/unstable" and
+              .sources == ["git@git.sr.ht:~fuzzybear3965/agent-sandbox"] and
+              .secrets == [
+                "3a60ba67-89eb-49e6-a818-f4d28848de74",
+                "6e416072-c83c-4b52-b040-42396f7d2b74"
+              ] and
+              (.tasks | length) == 3 and
+              .submitter["git.sr.ht"].enabled == true
+            ' >/dev/null
+            cp ${../../.build.yml} "$out"
+          '';
+
       composeCheck =
         pkgs.runCommand "agent-sandbox-compose-check"
           {
@@ -171,11 +202,18 @@ _: {
         oci-image = agentImage;
         agent-rootfs = agentRootfs;
         agent-systemd-nspawn = nspawnApp;
+        publish-image = publishImage;
       };
 
-      apps.agent-systemd-nspawn = {
-        program = lib.getExe nspawnApp;
-        meta.description = "Run agent-sandbox in an ephemeral systemd-nspawn unit";
+      apps = {
+        agent-systemd-nspawn = {
+          program = lib.getExe nspawnApp;
+          meta.description = "Run agent-sandbox in an ephemeral systemd-nspawn unit";
+        };
+        publish-image = {
+          program = lib.getExe publishImage;
+          meta.description = "Publish and verify the agent sandbox OCI image";
+        };
       };
 
       # Consumer outputs are mirrored into the development partition's checks.
@@ -188,6 +226,8 @@ _: {
           clippyCheck
           composeCheck
           nspawnApp
+          publishImage
+          sourcehutManifestCheck
           ;
         agentPackage = agent;
       };
