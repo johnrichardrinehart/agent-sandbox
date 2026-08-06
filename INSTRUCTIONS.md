@@ -47,3 +47,10 @@ The service should implement a logger and use it accordingly.
 ### 6. README
 
 Include a `README.md` that explains the project, and how another team member would get set up to run it.
+
+### Acceptance
+
+The scripts must run successfully inside the sandbox, driven entirely through your RPC service.
+* `csv_transform.py`
+* `linked_list.py`
+* `ocr_demo.py`
