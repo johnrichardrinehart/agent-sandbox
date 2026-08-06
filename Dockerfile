@@ -15,6 +15,7 @@ RUN mkdir -p /opt /home/user \
 
 USER sandbox-manager
 ENV HOME=/home/user
+ENV AGENT_SANDBOX_BWRAP=/opt/agent-runtime/bin/bwrap
 ENV PATH=/opt/agent-runtime/bin:/nix/var/nix/profiles/default/bin
 ENV SSL_CERT_FILE=/opt/agent-runtime/etc/ssl/certs/ca-bundle.crt
 WORKDIR /home/user

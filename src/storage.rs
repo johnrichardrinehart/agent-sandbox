@@ -3,12 +3,13 @@ use std::env;
 use std::error::Error;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
 use object_store::{ObjectMeta, ObjectStore};
-use tracing::{info, warn};
+use tracing::info;
 use walkdir::WalkDir;
 
 pub(crate) type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -20,14 +21,11 @@ pub(crate) struct S3Sync {
 }
 
 impl S3Sync {
-    pub(crate) fn from_env() -> StorageResult<Option<Self>> {
-        let Some(bucket) = env::var("AGENT_SANDBOX_S3_BUCKET")
+    pub(crate) fn from_env() -> StorageResult<Self> {
+        let bucket = env::var("AGENT_SANDBOX_S3_BUCKET")
             .ok()
             .filter(|value| !value.is_empty())
-        else {
-            warn!("AGENT_SANDBOX_S3_BUCKET is unset; S3 synchronization is disabled");
-            return Ok(None);
-        };
+            .ok_or("AGENT_SANDBOX_S3_BUCKET must name a bucket")?;
 
         let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(bucket)
@@ -42,10 +40,21 @@ impl S3Sync {
         }
 
         let prefix = env::var("AGENT_SANDBOX_S3_PREFIX").unwrap_or_else(|_| "home".into());
-        Ok(Some(Self {
+        Ok(Self {
             store: Arc::new(builder.build()?),
             prefix: Path::parse(prefix)?,
-        }))
+        })
+    }
+
+    pub(crate) async fn verify_write(&self) -> StorageResult<()> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let sentinel = Path::from(format!(
+            ".agent-sandbox-test-{}-{nonce}",
+            std::process::id()
+        ));
+        self.store.put(&sentinel, Vec::new().into()).await?;
+        self.store.delete(&sentinel).await?;
+        Ok(())
     }
 
     pub(crate) async fn sync_down(&self, root: &FsPath) -> StorageResult<()> {
@@ -144,6 +153,19 @@ mod tests {
             store: Arc::new(InMemory::new()),
             prefix: Path::from("home"),
         }
+    }
+
+    #[tokio::test]
+    async fn verifies_bucket_writes_without_leaving_sentinel() {
+        let sync = syncer();
+        sync.verify_write().await.expect("verify bucket write");
+        let objects = sync
+            .store
+            .list(None)
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("list bucket");
+        assert!(objects.is_empty());
     }
 
     #[tokio::test]

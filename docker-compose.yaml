@@ -2,10 +2,10 @@ services:
   agent:
     build:
       context: .
-    image: ghcr.io/johnrichardrinehart/agent-sandbox:latest
+    image: ghcr.io/johnrichardrinehart/agent-sandbox:0.0.21
     environment:
       AGENT_SANDBOX_LISTEN: 0.0.0.0:8080
-      AGENT_SANDBOX_S3_BUCKET: ${AGENT_SANDBOX_S3_BUCKET:-}
+      AGENT_SANDBOX_S3_BUCKET: ${AGENT_SANDBOX_S3_BUCKET:-agent-sandbox}
       AGENT_SANDBOX_S3_ENDPOINT: ${AGENT_SANDBOX_S3_ENDPOINT:-}
       AGENT_SANDBOX_S3_PREFIX: ${AGENT_SANDBOX_S3_PREFIX:-home}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
@@ -17,7 +17,11 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "8080:8080"
+    cap_drop:
+      - ALL
     restart: unless-stopped
+    security_opt:
+      - seccomp=${AGENT_SANDBOX_SECCOMP_PROFILE:-./seccomp.json}
     stop_grace_period: 30s
     healthcheck:
       test:

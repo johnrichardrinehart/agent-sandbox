@@ -1,6 +1,11 @@
 use std::path::{Component, Path, PathBuf};
 use std::{fs, io};
 
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tonic::{Request, Response, Status};
@@ -15,17 +20,29 @@ use crate::sandbox::v0::{
 
 const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 const MAX_COMMAND_TIMEOUT_MS: u64 = 300_000;
+const COMMAND_TIMEOUT_EXIT_CODE: i32 = 124;
 
 #[derive(Clone)]
 pub(crate) struct SandboxService {
     root: PathBuf,
+    sandbox_program: PathBuf,
 }
 
 impl SandboxService {
     pub(crate) fn new(root: impl AsRef<Path>) -> io::Result<Self> {
+        let sandbox_program = std::env::var_os("AGENT_SANDBOX_BWRAP")
+            .map_or_else(|| PathBuf::from("bwrap"), PathBuf::from);
+        Self::with_sandbox_program(root, sandbox_program)
+    }
+
+    fn with_sandbox_program(
+        root: impl AsRef<Path>,
+        sandbox_program: impl Into<PathBuf>,
+    ) -> io::Result<Self> {
         fs::create_dir_all(root.as_ref())?;
         Ok(Self {
             root: fs::canonicalize(root)?,
+            sandbox_program: sandbox_program.into(),
         })
     }
 
@@ -74,22 +91,53 @@ impl SandboxService {
         let relative = self.relative_path(requested)?;
         let candidate = self.root.join(relative);
 
-        if candidate.exists() {
-            return self.ensure_scoped(fs::canonicalize(candidate)?);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(SandboxPathError::Denied(
+                    "write target must not be a symbolic link",
+                ));
+            }
+            Ok(_) => return self.ensure_scoped(fs::canonicalize(candidate)?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
 
         let parent = candidate
             .parent()
             .ok_or(SandboxPathError::Invalid("path has no parent"))?;
-        if create_parents {
-            fs::create_dir_all(parent)?;
-        }
-        let canonical_parent = fs::canonicalize(parent)?;
-        let canonical_parent = self.ensure_scoped(canonical_parent)?;
+        let canonical_parent = if create_parents {
+            self.create_scoped_parents(parent)?
+        } else {
+            self.ensure_scoped(fs::canonicalize(parent)?)?
+        };
         let filename = candidate
             .file_name()
             .ok_or(SandboxPathError::Invalid("path must name a file"))?;
         Ok(canonical_parent.join(filename))
+    }
+
+    fn create_scoped_parents(&self, parent: &Path) -> Result<PathBuf, SandboxPathError> {
+        let relative = parent
+            .strip_prefix(&self.root)
+            .map_err(|_| SandboxPathError::Denied("path escapes the sandbox root"))?;
+        let mut current = self.root.clone();
+        for component in relative.components() {
+            current.push(component);
+            match fs::symlink_metadata(&current) {
+                Ok(_) => {
+                    current = self.ensure_scoped(fs::canonicalize(&current)?)?;
+                    if !current.is_dir() {
+                        return Err(SandboxPathError::Invalid("parent path is not a directory"));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir(&current)?;
+                    current = self.ensure_scoped(fs::canonicalize(&current)?)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(current)
     }
 
     fn ensure_scoped(&self, path: PathBuf) -> Result<PathBuf, SandboxPathError> {
@@ -126,7 +174,7 @@ impl FilesystemService for SandboxService {
         let path = self
             .writable_path(&request.path, request.create_parents)
             .map_err(SandboxPathError::into_status)?;
-        fs::write(&path, &request.content).map_err(|error| io_status(&error))?;
+        write_content(&path, &request.content).map_err(|error| io_status(&error))?;
         info!(path = %path.display(), bytes = request.content.len(), "wrote file");
         Ok(Response::new(WriteFileResponse {
             bytes_written: request.content.len() as u64,
@@ -186,25 +234,66 @@ impl CommandService for SandboxService {
         };
 
         info!(program, cwd = %working_directory.display(), timeout_ms, "executing command");
-        let mut command = Command::new(program);
+        let mut command = Command::new(&self.sandbox_program);
         command
+            .args([
+                "--ro-bind",
+                "/",
+                "/",
+                "--tmpfs",
+                "/tmp",
+                "--chmod",
+                "1777",
+                "/tmp",
+                "--tmpfs",
+                "/var/tmp",
+                "--chmod",
+                "1777",
+                "/var/tmp",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/proc",
+                "--bind",
+            ])
+            .arg(&self.root)
+            .arg(&self.root)
+            .args([
+                "--unshare-user",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--die-with-parent",
+            ])
+            .args(["--new-session", "--setenv", "HOME"])
+            .arg(&self.root)
+            .arg("--chdir")
+            .arg(&working_directory)
+            .arg("--")
+            .arg(program)
             .args(arguments)
-            .current_dir(working_directory)
             .envs(request.environment)
             .kill_on_drop(true);
 
-        let output = timeout(Duration::from_millis(timeout_ms), command.output())
-            .await
-            .map_err(|_| Status::deadline_exceeded("command timed out"))?
-            .map_err(|error| Status::internal(format!("failed to execute command: {error}")))?;
+        let response = match timeout(Duration::from_millis(timeout_ms), command.output()).await {
+            Ok(Ok(output)) => ExecuteCommandResponse {
+                stdout: output.stdout,
+                stderr: output.stderr,
+                exit_code: output.status.code().unwrap_or(-1),
+            },
+            Ok(Err(error)) => ExecuteCommandResponse {
+                stdout: Vec::new(),
+                stderr: format!("failed to start command sandbox: {error}\n").into_bytes(),
+                exit_code: 127,
+            },
+            Err(_) => ExecuteCommandResponse {
+                stdout: Vec::new(),
+                stderr: b"command timed out\n".to_vec(),
+                exit_code: COMMAND_TIMEOUT_EXIT_CODE,
+            },
+        };
 
-        let exit_code = output.status.code().unwrap_or(-1);
-        info!(program, exit_code, "command completed");
-        Ok(Response::new(ExecuteCommandResponse {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            exit_code,
-        }))
+        info!(program, exit_code = response.exit_code, "command completed");
+        Ok(Response::new(response))
     }
 }
 
@@ -230,6 +319,24 @@ impl From<io::Error> for SandboxPathError {
     }
 }
 
+#[cfg(unix)]
+fn write_content(path: &Path, content: &[u8]) -> io::Result<()> {
+    // O_NOFOLLOW prevents a concurrent replacement with a symbolic link.
+    const O_NOFOLLOW: i32 = 0x20_000;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(content)
+}
+
+#[cfg(not(unix))]
+fn write_content(path: &Path, content: &[u8]) -> io::Result<()> {
+    fs::write(path, content)
+}
+
 fn io_status(error: &io::Error) -> Status {
     match error.kind() {
         io::ErrorKind::NotFound => Status::not_found(error.to_string()),
@@ -249,8 +356,48 @@ mod tests {
 
     fn service() -> (TempDir, SandboxService) {
         let root = TempDir::new().expect("create temporary root");
-        let service = SandboxService::new(root.path()).expect("create service");
+        let service =
+            SandboxService::with_sandbox_program(root.path(), "bwrap").expect("create service");
         (root, service)
+    }
+
+    fn command_sandbox_is_supported() -> bool {
+        let root = TempDir::new().expect("create sandbox probe root");
+        std::process::Command::new("bwrap")
+            .args([
+                "--ro-bind",
+                "/",
+                "/",
+                "--tmpfs",
+                "/tmp",
+                "--chmod",
+                "1777",
+                "/tmp",
+                "--tmpfs",
+                "/var/tmp",
+                "--chmod",
+                "1777",
+                "/var/tmp",
+                "--dev",
+                "/dev",
+                "--tmpfs",
+                "/proc",
+                "--bind",
+            ])
+            .arg(root.path())
+            .arg(root.path())
+            .args([
+                "--unshare-user",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--die-with-parent",
+                "--new-session",
+                "--chdir",
+            ])
+            .arg(root.path())
+            .args(["--", "true"])
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     #[tokio::test]
@@ -308,8 +455,56 @@ mod tests {
         assert_eq!(error.code(), Code::PermissionDenied);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_dangling_symlink_without_writing_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let (root, service) = service();
+        let outside = TempDir::new().expect("create outside directory");
+        let outside_file = outside.path().join("escaped.txt");
+        symlink(&outside_file, root.path().join("dangling")).expect("create dangling symlink");
+
+        let error = service
+            .write_file(Request::new(WriteFileRequest {
+                path: "dangling".into(),
+                content: b"escape".to_vec(),
+                create_parents: false,
+            }))
+            .await
+            .expect_err("dangling symlink must fail");
+
+        assert_eq!(error.code(), Code::PermissionDenied);
+        assert!(!outside_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlink_parent_without_creating_outside_directories() {
+        use std::os::unix::fs::symlink;
+
+        let (root, service) = service();
+        let outside = TempDir::new().expect("create outside directory");
+        symlink(outside.path(), root.path().join("outside")).expect("create directory symlink");
+
+        let error = service
+            .write_file(Request::new(WriteFileRequest {
+                path: "outside/new/escaped.txt".into(),
+                content: b"escape".to_vec(),
+                create_parents: true,
+            }))
+            .await
+            .expect_err("symlink parent must fail");
+
+        assert_eq!(error.code(), Code::PermissionDenied);
+        assert!(!outside.path().join("new").exists());
+    }
+
     #[tokio::test]
     async fn executes_each_command_in_a_fresh_process() {
+        if !command_sandbox_is_supported() {
+            return;
+        }
         let (_root, service) = service();
         let response = service
             .execute_command(Request::new(ExecuteCommandRequest {
@@ -323,5 +518,98 @@ mod tests {
         assert_eq!(response.stdout, b"available");
         assert!(response.stderr.is_empty());
         assert_eq!(response.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn commands_do_not_share_temporary_files() {
+        if !command_sandbox_is_supported() {
+            return;
+        }
+        let (_root, service) = service();
+        let write = service
+            .execute_command(Request::new(ExecuteCommandRequest {
+                argv: vec!["sh".into(), "-c".into(), "printf leak >/tmp/leak".into()],
+                ..Default::default()
+            }))
+            .await
+            .expect("write temporary file")
+            .into_inner();
+        assert_eq!(write.exit_code, 0);
+
+        let read = service
+            .execute_command(Request::new(ExecuteCommandRequest {
+                argv: vec!["sh".into(), "-c".into(), "test ! -e /tmp/leak".into()],
+                ..Default::default()
+            }))
+            .await
+            .expect("check temporary file")
+            .into_inner();
+        assert_eq!(read.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn command_completion_terminates_descendants() {
+        if !command_sandbox_is_supported() {
+            return;
+        }
+        let (root, service) = service();
+        let marker = root.path().join("descendant-finished");
+        let response = service
+            .execute_command(Request::new(ExecuteCommandRequest {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "(sleep 0.1; touch descendant-finished) </dev/null >/dev/null 2>&1 &".into(),
+                ],
+                ..Default::default()
+            }))
+            .await
+            .expect("start detached descendant")
+            .into_inner();
+        assert_eq!(response.exit_code, 0);
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn missing_executable_returns_response_triplet() {
+        if !command_sandbox_is_supported() {
+            return;
+        }
+        let (_root, service) = service();
+        let response = service
+            .execute_command(Request::new(ExecuteCommandRequest {
+                argv: vec!["executable-that-does-not-exist".into()],
+                ..Default::default()
+            }))
+            .await
+            .expect("return command result")
+            .into_inner();
+
+        assert_ne!(response.exit_code, 0);
+        assert!(response.stdout.is_empty());
+        assert!(!response.stderr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn timeout_returns_response_triplet() {
+        if !command_sandbox_is_supported() {
+            return;
+        }
+        let (_root, service) = service();
+        let response = service
+            .execute_command(Request::new(ExecuteCommandRequest {
+                argv: vec!["sleep".into(), "10".into()],
+                timeout_ms: 10,
+                ..Default::default()
+            }))
+            .await
+            .expect("return timeout result")
+            .into_inner();
+
+        assert_eq!(response.exit_code, COMMAND_TIMEOUT_EXIT_CODE);
+        assert!(response.stdout.is_empty());
+        assert_eq!(response.stderr, b"command timed out\n");
     }
 }

@@ -90,18 +90,20 @@ grpcurl -plaintext -d '{"argv":["python","-c","print(6 * 7)"]}' \
   127.0.0.1:8080 sandbox.v0.CommandService/ExecuteCommand
 ```
 
-Protocol Buffer `bytes` fields use base64 in JSON. `ExecuteCommand.argv` bypasses the shell; request a shell explicitly when shell syntax is needed. The optional working directory is relative to `/home/user`, and command timeouts default to 30 seconds with a five-minute maximum.
+Protocol Buffer `bytes` fields use base64 in JSON. `ExecuteCommand.argv` does not use a shell. Specify a shell in `argv` when you need shell syntax. The optional working directory is relative to `/home/user`. Each command gets a private process namespace and temporary file system. Only files in `/home/user` persist between calls. Command timeouts default to 30 seconds and have a five-minute maximum. A missing program returns a nonzero exit code. A timeout returns exit code 124.
 
 ## Configure S3 synchronization
 
-Set `AGENT_SANDBOX_S3_BUCKET` to enable persistence. The service downloads the configured prefix before accepting requests and uploads `/home/user` after `SIGTERM` or `SIGINT`. These variables configure the store:
+S3 persistence is mandatory. Before it accepts requests, the service writes and removes a sentinel object. It then downloads the configured prefix. The service exits if it cannot write the sentinel or complete the download. The Compose restart policy restarts the failed container. On `SIGTERM` or `SIGINT`, the service uploads `/home/user`.
 
-- `AGENT_SANDBOX_S3_BUCKET`: bucket name; an empty value disables persistence.
+These variables configure the store:
+
+- `AGENT_SANDBOX_S3_BUCKET`: required bucket name. Compose defaults to `agent-sandbox`.
 - `AGENT_SANDBOX_S3_PREFIX`: object prefix, defaulting to `home`.
 - `AGENT_SANDBOX_S3_ENDPOINT`: optional S3-compatible endpoint for services such as MinIO.
 - Standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables provide credentials and region. Set `AWS_ALLOW_HTTP=true` for a plain-HTTP local endpoint or `AWS_SKIP_SIGNATURE=true` for an anonymous test service.
 
-Compose passes these variables into its single container and maps `host.docker.internal` to the host gateway, so a host S3-compatible service can be used without adding another Compose service.
+Compose passes these variables into its single container and maps `host.docker.internal` to the host gateway. You can use an S3-compatible service on the host without another Compose service. Compose uses [`seccomp.json`](seccomp.json), which is based on the Moby default profile at commit `f9bc03ec19b2dc4c091449b08e88f85c0caa9f0b`. The profile adds only the namespace, mount, and root-switch system calls that Bubblewrap needs. Compose also drops all container capabilities. See [CAVEATS.md](CAVEATS.md) for the remaining kernel risk.
 
 ## Continuous integration
 

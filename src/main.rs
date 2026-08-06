@@ -34,9 +34,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let root =
         PathBuf::from(env::var("AGENT_SANDBOX_HOME").unwrap_or_else(|_| "/home/user".into()));
     let storage = S3Sync::from_env()?;
-    if let Some(storage) = &storage {
-        storage.sync_down(&root).await?;
-    }
+    storage.verify_write().await?;
+    storage.sync_down(&root).await?;
 
     let service = SandboxService::new(&root)?;
     let filesystem = FilesystemServiceServer::new(service.clone());
@@ -71,7 +70,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-async fn shutdown_signal(storage: Option<S3Sync>, root: PathBuf) {
+async fn shutdown_signal(storage: S3Sync, root: PathBuf) {
     #[cfg(unix)]
     {
         let mut terminate =
@@ -92,9 +91,7 @@ async fn shutdown_signal(storage: Option<S3Sync>, root: PathBuf) {
     }
 
     info!("shutdown requested");
-    if let Some(storage) = storage
-        && let Err(error) = storage.sync_up(&root).await
-    {
+    if let Err(error) = storage.sync_up(&root).await {
         error!(%error, "failed to synchronize sandbox to S3 during shutdown");
     }
 }

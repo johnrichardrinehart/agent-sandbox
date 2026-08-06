@@ -21,6 +21,7 @@ _: {
         src = rustSource;
         cargoLock.lockFile = ../../Cargo.lock;
         nativeBuildInputs = [ pkgs.protobuf ];
+        nativeCheckInputs = [ pkgs.bubblewrap ];
         strictDeps = true;
 
         meta = {
@@ -31,6 +32,10 @@ _: {
         };
       };
 
+      tesseract = pkgs.tesseract.override {
+        enableLanguages = [ "eng" ];
+      };
+
       python = pkgs.python3.withPackages (pythonPackages: [
         pythonPackages.matplotlib
         pythonPackages.numpy
@@ -38,14 +43,17 @@ _: {
         pythonPackages.orjson
         pythonPackages.pandas
         pythonPackages.pillow
-        pythonPackages.pytesseract
+        ((pythonPackages.pytesseract.override { inherit tesseract; }).overridePythonAttrs (_: {
+          doCheck = false;
+        }))
         pythonPackages.requests
       ]);
 
       agentRuntimePackages = [
         agent
+        pkgs.bubblewrap
         pkgs.cacert
-        pkgs.tesseract
+        tesseract
         python
       ];
 
@@ -55,7 +63,8 @@ _: {
       };
 
       agentRootfs = pkgs.runCommand "agent-sandbox-rootfs" { } ''
-        mkdir -p "$out/etc" "$out/home/user" "$out/usr/bin"
+        mkdir -p "$out/dev" "$out/etc" "$out/home/user" "$out/proc" "$out/tmp" "$out/usr/bin" "$out/var/tmp"
+        chmod 1777 "$out/tmp" "$out/var/tmp"
         cat > "$out/etc/passwd" <<'EOF'
         root:x:0:0:root:/root:/bin/sh
         sandbox-manager:x:10001:10001:Sandbox manager:/home/user:/bin/sh
@@ -72,7 +81,8 @@ _: {
         tag = "latest";
         contents = agentRuntimePackages;
         fakeRootCommands = ''
-          mkdir -p ./etc ./home/user
+          mkdir -p ./dev ./etc ./home/user ./proc ./tmp ./var/tmp
+          chmod 1777 ./tmp ./var/tmp
           cat > ./etc/passwd <<'EOF'
           root:x:0:0:root:/root:/bin/sh
           sandbox-manager:x:10001:10001:Sandbox manager:/home/user:/bin/sh
@@ -87,6 +97,7 @@ _: {
           User = "sandbox-manager";
           Env = [
             "HOME=/home/user"
+            "AGENT_SANDBOX_BWRAP=${lib.getExe pkgs.bubblewrap}"
             "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
           ];
           WorkingDir = "/home/user";
@@ -279,12 +290,21 @@ _: {
               "http://127.0.0.1:9000/agent-sandbox/home/from-s3.txt"
           )
           machine.succeed("docker load < ${agentImage}")
+          machine.fail(
+              "docker run --rm --network none "
+              "--env AGENT_SANDBOX_S3_BUCKET=missing "
+              "--env AGENT_SANDBOX_S3_ENDPOINT=http://127.0.0.1:1 "
+              "--env AWS_DEFAULT_REGION=us-east-1 "
+              "--env AWS_SKIP_SIGNATURE=true "
+              "ghcr.io/johnrichardrinehart/agent-sandbox:latest"
+          )
 
           storage_ip = storage.succeed(
               "ip -4 -o address show dev eth1 | awk '{print $4}' | cut -d/ -f1"
           ).strip()
           compose_env = (
               "AGENT_SANDBOX_S3_BUCKET=agent-sandbox "
+              "AGENT_SANDBOX_SECCOMP_PROFILE=${../../seccomp.json} "
               f"AGENT_SANDBOX_S3_ENDPOINT=http://{storage_ip}:9000 "
               "AGENT_SANDBOX_S3_PREFIX=home "
               "AWS_DEFAULT_REGION=us-east-1 AWS_ALLOW_HTTP=true "
@@ -337,7 +357,9 @@ _: {
                   "'{argv:[\"python\",$script],timeoutMs:\"120000\"}'); "
                   "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
                   "sandbox.v0.CommandService/ExecuteCommand >/tmp/command.json; "
-                  "test \"$(jq -r '.exitCode // 0' /tmp/command.json)\" -eq 0; "
+                  "code=$(jq -r '.exitCode // 0' /tmp/command.json); "
+                  "if [ \"$code\" -ne 0 ]; then "
+                  "jq -r .stderr /tmp/command.json | base64 -d >&2; exit \"$code\"; fi; "
                   f"jq -r .{stream} /tmp/command.json | base64 -d | grep -F '{expected}'"
               )
 
@@ -367,6 +389,62 @@ _: {
               "sandbox.v0.CommandService/ExecuteCommand >/tmp/failure.json; "
               "test \"$(jq -r .exitCode /tmp/failure.json)\" -eq 7; "
               "jq -r .stderr /tmp/failure.json | base64 -d | grep -Fx bad"
+          )
+          machine.succeed(
+              "request=$(jq -nc --arg command "
+              "'open(\"/tmp/leak\", \"w\").write(\"leak\")' "
+              "'{argv:[\"python\",\"-c\",$command]}'); "
+              "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+              "sandbox.v0.CommandService/ExecuteCommand >/tmp/transient.json; "
+              "code=$(jq -r '.exitCode // 0' /tmp/transient.json); "
+              "if [ \"$code\" -ne 0 ]; then "
+              "jq -r .stderr /tmp/transient.json | base64 -d >&2; exit \"$code\"; fi"
+          )
+          machine.succeed(
+              "request=$(jq -nc --arg command "
+              "'import os,sys; sys.exit(os.path.exists(\"/tmp/leak\"))' "
+              "'{argv:[\"python\",\"-c\",$command]}'); "
+              "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+              "sandbox.v0.CommandService/ExecuteCommand | jq -e '(.exitCode // 0) == 0'"
+          )
+          machine.succeed(
+              "request=$(jq -nc --arg command "
+              "'import os,time; pid=os.fork(); "
+              "pid and os._exit(0); os.setsid(); "
+              "fd=os.open(\"/dev/null\",os.O_RDWR); "
+              "[os.dup2(fd,n) for n in (0,1,2)]; "
+              "time.sleep(1); open(\"descendant-leak\",\"w\").close()' "
+              "'{argv:[\"python\",\"-c\",$command]}'); "
+              "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+              "sandbox.v0.CommandService/ExecuteCommand | jq -e '(.exitCode // 0) == 0'; "
+              "sleep 2"
+          )
+          machine.fail(
+              "grpcurl -plaintext -d '{\"path\":\"descendant-leak\"}' "
+              "127.0.0.1:8080 sandbox.v0.FilesystemService/ReadFile"
+          )
+          machine.succeed(
+              "grpcurl -plaintext -d '{\"argv\":[\"missing-executable\"]}' "
+              "127.0.0.1:8080 sandbox.v0.CommandService/ExecuteCommand "
+              "| jq -e '(.exitCode // 0) != 0 and ((.stderr // \"\") | length > 0)'"
+          )
+          machine.succeed(
+              "grpcurl -plaintext -d "
+              "'{\"argv\":[\"python\",\"-c\",\"import time; time.sleep(10)\"],\"timeoutMs\":\"10\"}' "
+              "127.0.0.1:8080 sandbox.v0.CommandService/ExecuteCommand "
+              "| jq -e '.exitCode == 124 and ((.stderr | @base64d) == \"command timed out\\n\")'"
+          )
+          machine.succeed(
+              "request=$(jq -nc --arg command "
+              "'import os; os.symlink(\"/tmp/escaped\", \"dangling\")' "
+              "'{argv:[\"python\",\"-c\",$command]}'); "
+              "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+              "sandbox.v0.CommandService/ExecuteCommand | jq -e '(.exitCode // 0) == 0'"
+          )
+          machine.fail(
+              "grpcurl -plaintext -d "
+              "'{\"path\":\"dangling\",\"content\":\"ZXNjYXBl\"}' "
+              "127.0.0.1:8080 sandbox.v0.FilesystemService/WriteFile"
           )
 
           machine.succeed(
