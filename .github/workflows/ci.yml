@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - nix-init
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: DeterminateSystems/determinate-nix-action@2a0be2498974c2b6327e19780488744384637d88 # v3.21.7
+      - run: nix flake check --print-build-logs
+
+  publish-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - uses: DeterminateSystems/determinate-nix-action@2a0be2498974c2b6327e19780488744384637d88 # v3.21.7
+      - name: Build Nix OCI image
+        run: nix build .#agent-image --out-link result-image
+      - name: Load and tag image
+        id: image
+        run: |
+          image=ghcr.io/johnrichardrinehart/agent-sandbox
+          version=0.0.$(git rev-list --count HEAD)
+          podman load < result-image
+          podman tag "$image:latest" "$image:$version"
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Publish image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ steps.image.outputs.version }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "${{ github.actor }}" --password-stdin
+          podman push "$IMAGE:latest"
+          podman push "$IMAGE:$VERSION"
+      - name: Verify published tags
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ steps.image.outputs.version }}
+        run: |
+          latest_digest=$(nix shell --inputs-from . nixpkgs#skopeo -c skopeo inspect --format '{{.Digest}}' "docker://$IMAGE:latest")
+          version_digest=$(nix shell --inputs-from . nixpkgs#skopeo -c skopeo inspect --format '{{.Digest}}' "docker://$IMAGE:$VERSION")
+          test -n "$latest_digest"
+          test "$latest_digest" = "$version_digest"
+          echo "Published $IMAGE:latest and $IMAGE:$VERSION as $latest_digest"
