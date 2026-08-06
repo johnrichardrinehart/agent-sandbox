@@ -20,5 +20,5 @@ ENV SSL_CERT_FILE=/opt/agent-runtime/etc/ssl/certs/ca-bundle.crt
 WORKDIR /home/user
 EXPOSE 8080
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+  CMD ["python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=2).close()"]
 ENTRYPOINT ["/opt/agent-runtime/bin/agent-sandbox"]

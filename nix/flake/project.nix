@@ -8,6 +8,8 @@ _: {
         root = ../..;
         fileset = lib.fileset.unions [
           ../../src
+          ../../proto
+          ../../build.rs
           ../../Cargo.toml
           ../../Cargo.lock
         ];
@@ -18,6 +20,7 @@ _: {
         version = "0.1.0";
         src = rustSource;
         cargoLock.lockFile = ../../Cargo.lock;
+        nativeBuildInputs = [ pkgs.protobuf ];
         strictDeps = true;
 
         meta = {
@@ -154,18 +157,19 @@ _: {
         '';
       };
 
-      clippyCheck = pkgs.stdenvNoCC.mkDerivation {
+      clippyCheck = pkgs.rustPlatform.buildRustPackage {
         pname = "agent-sandbox-clippy";
         version = "0.1.0";
         src = rustSource;
+        cargoLock.lockFile = ../../Cargo.lock;
         nativeBuildInputs = [
-          pkgs.cargo
           pkgs.clippy
-          pkgs.rustc
+          pkgs.protobuf
         ];
+        strictDeps = true;
+        doCheck = false;
         buildPhase = ''
           runHook preBuild
-          export CARGO_HOME="$TMPDIR/cargo-home"
           cargo clippy --all-targets --locked --offline -- -D warnings
           runHook postBuild
         '';
@@ -216,8 +220,57 @@ _: {
             export HOME="$TMPDIR/home"
             export XDG_RUNTIME_DIR="$TMPDIR/run"
             mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
-            podman-compose --file ${../../docker-compose.yml} config > "$out"
+            podman-compose --file ${../../docker-compose.yaml} config > "$out"
           '';
+
+      # Keep this test as an explicit package rather than a flake check. CI runs
+      # `nix flake check`, so it evaluates but does not build the expensive VM.
+      nixosVmTest = pkgs.testers.runNixOSTest {
+        name = "agent-sandbox-docker";
+
+        nodes.machine =
+          { pkgs, ... }:
+          {
+            virtualisation = {
+              docker.enable = true;
+              diskSize = 8192;
+              memorySize = 2048;
+            };
+            environment.systemPackages = [
+              pkgs.docker-compose
+              pkgs.grpcurl
+            ];
+          };
+
+        testScript = ''
+          start_all()
+          machine.wait_for_unit("docker.service")
+          machine.succeed("docker load < ${agentImage}")
+          machine.succeed(
+              "docker-compose --project-name agent-sandbox "
+              "--file ${../../docker-compose.yaml} up --detach --no-build"
+          )
+          machine.wait_until_succeeds(
+              "grpcurl -plaintext 127.0.0.1:8080 list "
+              "sandbox.v0.FilesystemService | grep WriteFile"
+          )
+          machine.succeed(
+              "grpcurl -plaintext -d "
+              "'{\"service\":\"sandbox.v0.FilesystemService\"}' "
+              "127.0.0.1:8080 grpc.health.v1.Health/Check "
+              "| grep SERVING"
+          )
+          machine.succeed(
+              "grpcurl -plaintext -d "
+              "'{\"service\":\"sandbox.v0.CommandService\"}' "
+              "127.0.0.1:8080 grpc.health.v1.Health/Check "
+              "| grep SERVING"
+          )
+          machine.succeed(
+              "test \"$(docker ps --filter status=running --format '{{.Names}}' | wc -l)\" -eq 1"
+          )
+        '';
+      };
     in
     {
       packages = {
@@ -230,6 +283,7 @@ _: {
         agent-systemd-nspawn = nspawnApp;
         exercise-image = exerciseImage;
         publish-image = publishImage;
+        nixos-vm-test = nixosVmTest;
       };
 
       apps = {

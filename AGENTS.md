@@ -4,6 +4,14 @@
 
 - Do not modify `INSTRUCTIONS.md`. Preserve its exact contents and hash across every revision.
 
+## Generated files
+
+- Do not commit generated files. Generate them only in ignored build directories.
+
+## Lint exceptions
+
+- Every lint suppression, including each `allow` attribute for Clippy or another linter, must have an inline comment that explains why the exception is needed.
+
 ## Writing standard
 
 - You must use ASD-STE100 Simplified Technical English for commit messages, pull request descriptions, Markdown prose, and source code comments.

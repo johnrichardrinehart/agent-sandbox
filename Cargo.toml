@@ -7,6 +7,16 @@ description = "Containerized code sandbox service"
 license = "MIT"
 publish = false
 
+[dependencies]
+prost = "0.13"
+tokio = { version = "1.44", features = ["macros", "rt-multi-thread"] }
+tonic = "0.12"
+tonic-health = "0.12"
+tonic-reflection = "0.12"
+
+[build-dependencies]
+tonic-build = "0.12"
+
 [lints.rust]
 unsafe_code = "forbid"
 

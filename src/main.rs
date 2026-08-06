@@ -1,60 +1,135 @@
 use std::env;
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread;
 
-const HEALTH_RESPONSE: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
-const NOT_FOUND_RESPONSE: &[u8] =
-    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+use sandbox::v0::{
+    ExecuteCommandRequest, ExecuteCommandResponse, HealthCheckRequest, HealthCheckResponse,
+    ReadFileRequest, ReadFileResponse, ServingStatus, WriteFileRequest, WriteFileResponse,
+    command_service_server::{CommandService, CommandServiceServer},
+    filesystem_service_server::{FilesystemService, FilesystemServiceServer},
+    health_service_server::{HealthService, HealthServiceServer},
+};
+use tonic::{Request, Response, Status, transport::Server};
 
-fn response_for(request_line: &str) -> &'static [u8] {
-    if request_line == "GET /healthz HTTP/1.1" {
-        HEALTH_RESPONSE
-    } else {
-        NOT_FOUND_RESPONSE
+// Tonic generates this module; its output cannot follow this crate's stricter Clippy policy.
+#[allow(clippy::pedantic)]
+mod sandbox {
+    pub mod v0 {
+        tonic::include_proto!("sandbox.v0");
     }
 }
 
-fn handle_connection(mut stream: TcpStream) -> io::Result<()> {
-    let mut request_line = String::new();
-    BufReader::new(stream.try_clone()?).read_line(&mut request_line)?;
-    stream.write_all(response_for(request_line.trim_end()))?;
-    stream.flush()
+const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("sandbox_descriptor");
+
+#[derive(Default)]
+struct SandboxService;
+
+#[tonic::async_trait]
+impl FilesystemService for SandboxService {
+    async fn write_file(
+        &self,
+        _request: Request<WriteFileRequest>,
+    ) -> Result<Response<WriteFileResponse>, Status> {
+        Err(Status::unimplemented("WriteFile is not implemented yet"))
+    }
+
+    async fn read_file(
+        &self,
+        _request: Request<ReadFileRequest>,
+    ) -> Result<Response<ReadFileResponse>, Status> {
+        Err(Status::unimplemented("ReadFile is not implemented yet"))
+    }
 }
 
-fn main() -> io::Result<()> {
-    let address = env::var("AGENT_SANDBOX_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
-    let listener = TcpListener::bind(&address)?;
-    eprintln!("agent-sandbox listening on {address}");
-
-    for connection in listener.incoming() {
-        match connection {
-            Ok(stream) => {
-                thread::spawn(move || {
-                    if let Err(error) = handle_connection(stream) {
-                        eprintln!("request failed: {error}");
-                    }
-                });
-            }
-            Err(error) => eprintln!("connection failed: {error}"),
-        }
+#[tonic::async_trait]
+impl HealthService for SandboxService {
+    async fn check(
+        &self,
+        _request: Request<HealthCheckRequest>,
+    ) -> Result<Response<HealthCheckResponse>, Status> {
+        Ok(Response::new(HealthCheckResponse {
+            status: ServingStatus::Serving.into(),
+        }))
     }
+}
+
+#[tonic::async_trait]
+impl CommandService for SandboxService {
+    async fn execute_command(
+        &self,
+        _request: Request<ExecuteCommandRequest>,
+    ) -> Result<Response<ExecuteCommandResponse>, Status> {
+        Err(Status::unimplemented(
+            "ExecuteCommand is not implemented yet",
+        ))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let address = env::var("AGENT_SANDBOX_LISTEN")
+        .unwrap_or_else(|_| "0.0.0.0:8080".into())
+        .parse()?;
+
+    let filesystem = FilesystemServiceServer::new(SandboxService);
+    let command = CommandServiceServer::new(SandboxService);
+    let versioned_health = HealthServiceServer::new(SandboxService);
+    let (mut health_reporter, health) = tonic_health::server::health_reporter();
+    health_reporter
+        .set_serving::<FilesystemServiceServer<SandboxService>>()
+        .await;
+    health_reporter
+        .set_serving::<CommandServiceServer<SandboxService>>()
+        .await;
+    health_reporter
+        .set_serving::<HealthServiceServer<SandboxService>>()
+        .await;
+
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+
+    eprintln!("agent-sandbox gRPC service listening on {address}");
+    Server::builder()
+        .add_service(health)
+        .add_service(reflection)
+        .add_service(versioned_health)
+        .add_service(filesystem)
+        .add_service(command)
+        .serve(address)
+        .await?;
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HEALTH_RESPONSE, NOT_FOUND_RESPONSE, response_for};
+    use super::*;
+    use tonic::Code;
 
-    #[test]
-    fn health_endpoint_is_available() {
-        assert_eq!(response_for("GET /healthz HTTP/1.1"), HEALTH_RESPONSE);
+    #[tokio::test]
+    async fn filesystem_handlers_are_explicit_stubs() {
+        let service = SandboxService;
+        let error = service
+            .read_file(Request::new(ReadFileRequest {
+                path: "fixture.txt".into(),
+            }))
+            .await
+            .expect_err("stub must reject calls");
+
+        assert_eq!(error.code(), Code::Unimplemented);
     }
 
-    #[test]
-    fn unknown_endpoint_is_not_found() {
-        assert_eq!(response_for("GET /missing HTTP/1.1"), NOT_FOUND_RESPONSE);
+    #[tokio::test]
+    async fn command_handler_is_an_explicit_stub() {
+        let service = SandboxService;
+        let error = service
+            .execute_command(Request::new(ExecuteCommandRequest {
+                argv: vec!["true".into()],
+                ..Default::default()
+            }))
+            .await
+            .expect_err("stub must reject calls");
+
+        assert_eq!(error.code(), Code::Unimplemented);
     }
 }

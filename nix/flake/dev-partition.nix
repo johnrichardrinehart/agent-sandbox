@@ -260,6 +260,7 @@
           pkgs.nixd
           pkgs.podman
           pkgs.podman-compose
+          pkgs.protobuf
           pkgs.rustc
           pkgs.rustfmt
         ];

@@ -2,7 +2,7 @@
 
 Agent sandbox is a Nix-built container service for running coding-agent workloads as an unprivileged user. This bootstrap provides the Rust service package, OCI image, rootless Podman environment, Docker Compose compatibility, and an ephemeral `systemd-nspawn` runner.
 
-The service currently exposes `GET /healthz` on port 8080. The filesystem and command RPC planes described in [INSTRUCTIONS.md](INSTRUCTIONS.md) are the next implementation milestone.
+The service exposes gRPC reflection and the standard gRPC health service on port 8080. The versioned API in [`proto/v0`](proto/v0) defines filesystem and command control planes. Their handlers currently return `UNIMPLEMENTED`. The health service reports both control planes as `SERVING`.
 
 ## Set up
 
@@ -24,6 +24,14 @@ nix flake check --print-build-logs
 nix build .#agent-sandbox
 nix build .#agent-image
 ```
+
+Run the Docker-in-NixOS integration test explicitly:
+
+```console
+nix build .#nixos-vm-test -L
+```
+
+The VM starts `docker.service`, loads the Nix-built image, starts the single Compose service, and checks both gRPC control planes from the host with `grpcurl`.
 
 The root flake follows the consumer-clean structure from `nix-project-template`: package and image definitions live under `nix/flake/`, while formatters, hooks, and shell tools are isolated in `dev/`.
 
@@ -72,7 +80,7 @@ The service itself listens on `0.0.0.0:8080` by default. Set `AGENT_SANDBOX_LIST
 
 ## Continuous integration
 
-GitHub Actions remains a check-only adapter. SourceHut runs the same `nix flake check --print-build-logs` contract from [`.build.yml`](.build.yml), builds the Nix OCI archive, and publishes only `refs/heads/main` to GHCR. Other SourceHut branches build and test the image but cannot publish it.
+GitHub Actions remains a check-only adapter. SourceHut runs the same `nix flake check --print-build-logs` contract from [`.build.yml`](.build.yml), builds the Nix OCI archive, and publishes only `refs/heads/main` to GHCR. Other SourceHut branches build and test the image but cannot publish it. The NixOS VM test is a package, not a flake check, so CI does not build or run it.
 
 The SourceHut repository is the registered private mirror at `git.sr.ht/~fuzzybear3965/agent-sandbox`. A push containing `.build.yml` submits a build automatically. The manifest uses the existing SourceHut CI SSH-key secret to clone this private repository.
 
