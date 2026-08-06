@@ -21,6 +21,11 @@ fi
 auth_dir=$(mktemp -d)
 trap 'rm -rf "$auth_dir"' EXIT
 export REGISTRY_AUTH_FILE="$auth_dir/auth.json"
+policy_file="$auth_dir/policy.json"
+
+# NixOS does not install a global containers policy. The source is the local,
+# Nix-built archive, so permit this process to read its unsigned image.
+printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' >"$policy_file"
 
 # SourceHut tasks enable xtrace. Keep credentials out of logs and argv.
 set +x
@@ -32,9 +37,9 @@ printf '%s' "$token" | skopeo login \
 unset token
 set -x
 
-skopeo copy --authfile "$REGISTRY_AUTH_FILE" \
+skopeo --policy "$policy_file" copy --authfile "$REGISTRY_AUTH_FILE" \
   "docker-archive:$archive" "docker://$image:latest"
-skopeo copy --authfile "$REGISTRY_AUTH_FILE" \
+skopeo --policy "$policy_file" copy --authfile "$REGISTRY_AUTH_FILE" \
   "docker-archive:$archive" "docker://$image:$version"
 
 latest_digest=$(skopeo inspect --authfile "$REGISTRY_AUTH_FILE" \
