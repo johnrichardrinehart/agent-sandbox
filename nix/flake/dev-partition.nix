@@ -157,15 +157,20 @@
             exit 1
           fi
 
-          echo 'Authorizing the ephemeral Docker daemon for this development shell.' >&2
-          sudo -v
+          sudo_arguments=()
+          if [[ "$watch_cwd" == 1 ]]; then
+            sudo_arguments+=(--non-interactive)
+          else
+            echo 'Authorizing the ephemeral Docker daemon for this development shell.' >&2
+          fi
+          sudo "''${sudo_arguments[@]}" -v
 
           : >"$log"
 
           # The runner serializes replacement and validates stale PIDs before
           # killing them. The caller opens its user-owned log before sudo.
           # shellcheck disable=SC2024
-          sudo -b ${runDockerDaemon}/bin/agent-dockerd-runner \
+          sudo "''${sudo_arguments[@]}" -b ${runDockerDaemon}/bin/agent-dockerd-runner \
             "$owner_pid" "$watch_cwd" "$project_root" "$project_id" \
             >"$log" 2>&1
 
@@ -234,6 +239,12 @@
         agent-systemd-nspawn = agentSandboxChecks.nspawnApp;
         cargo-clippy = agentSandboxChecks.clippyCheck;
         compose = agentSandboxChecks.composeCheck;
+        docker-authorization = pkgs.runCommand "agent-sandbox-docker-authorization-check" { } ''
+          grep --fixed-strings 'sudo_arguments+=(--non-interactive)' \
+            ${startDockerDaemon}/bin/agent-docker-daemon >/dev/null
+          grep --fixed-strings 'sudo --non-interactive -v' ${../../.envrc} >/dev/null
+          touch "$out"
+        '';
         exercise-image = agentSandboxChecks.exerciseImage;
         publish-image = agentSandboxChecks.publishImage;
         script-shebangs = agentSandboxChecks.scriptShebangCheck;
