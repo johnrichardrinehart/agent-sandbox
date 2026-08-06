@@ -19,6 +19,7 @@
           pkgs.coreutils
           pkgs.docker
           pkgs.iproute2
+          pkgs.util-linux
         ];
         text = ''
           owner_pid=$1
@@ -29,6 +30,7 @@
           gid="''${SUDO_GID:?agent-dockerd-runner must run through sudo}"
           runtime_dir="/run/user/$uid"
           daemon_dir="$runtime_dir/agent-sandbox-docker-$project_id"
+          data_dir="/var/tmp/agent-sandbox-docker-$uid-$project_id"
           pidfile="$daemon_dir/dockerd.pid"
           bridge="asd-''${project_id:0:11}"
           network_id=$(printf '%s' "$project_root" | cksum | cut -d ' ' -f1)
@@ -43,13 +45,30 @@
           [[ "$project_id" =~ ^[A-Za-z0-9_.-]{1,40}$ ]] || exit 1
           [[ "$project_id" != . && "$project_id" != .. ]] || exit 1
 
+          unmount_tree() {
+            local root=$1
+            local mount_target
+
+            while IFS= read -r mount_target; do
+              case "$mount_target" in
+                "$root" | "$root"/*)
+                  umount "$mount_target" 2>/dev/null \
+                    || umount --lazy "$mount_target" 2>/dev/null \
+                    || true
+                  ;;
+              esac
+            done < <(findmnt --raw --noheadings --output TARGET | sort --reverse)
+          }
+
           cleanup() {
             if [[ -n "''${daemon_pid:-}" ]]; then
               kill "$daemon_pid" 2>/dev/null || true
               wait "$daemon_pid" 2>/dev/null || true
             fi
             ip link delete "$bridge" 2>/dev/null || true
-            rm -rf "$daemon_dir"
+            unmount_tree "$daemon_dir"
+            unmount_tree "$data_dir"
+            rm -rf "$daemon_dir" "$data_dir"
           }
           trap cleanup EXIT INT TERM
 
@@ -70,7 +89,7 @@
             previous_daemon=$(<"$pidfile")
             previous_command=$(tr '\0' ' ' <"/proc/$previous_daemon/cmdline" 2>/dev/null || true)
             if [[ "$previous_daemon" =~ ^[1-9][0-9]*$ \
-              && "$previous_command" == *dockerd*"--data-root $daemon_dir/data"* ]]; then
+              && "$previous_command" == *dockerd*"--data-root $data_dir"* ]]; then
               kill "$previous_daemon" 2>/dev/null || true
               for _ in $(seq 1 50); do
                 kill -0 "$previous_daemon" 2>/dev/null || break
@@ -80,8 +99,10 @@
           fi
 
           ip link delete "$bridge" 2>/dev/null || true
-          rm -rf "$daemon_dir"
-          install -d -m 0750 -o root -g "$gid" "$daemon_dir"
+          unmount_tree "$daemon_dir"
+          unmount_tree "$data_dir"
+          rm -rf "$daemon_dir" "$data_dir"
+          install -d -m 0750 -o root -g "$gid" "$daemon_dir" "$data_dir"
           printf '%s\n' "$$" >"$daemon_dir/runner.pid"
           printf '%s\n' "$owner_pid" >"$daemon_dir/owner.pid"
 
@@ -92,7 +113,7 @@
           dockerd \
             --bridge "$bridge" \
             --fixed-cidr "$bridge_cidr" \
-            --data-root "$daemon_dir/data" \
+            --data-root "$data_dir" \
             --exec-root "$daemon_dir/exec" \
             --group "$gid" \
             --host "unix://$daemon_dir/docker.sock" \
@@ -243,9 +264,15 @@
         compose = agentSandboxChecks.composeCheck;
         docker-detachment = pkgs.runCommand "agent-sandbox-docker-detachment-check" { } ''
           daemon=${startDockerDaemon}/bin/agent-docker-daemon
+          runner=${runDockerDaemon}/bin/agent-dockerd-runner
           grep --fixed-strings 'for fd_path in /proc/$$/fd/*' "$daemon" >/dev/null
           grep --fixed-strings 'exec sudo --non-interactive --background' "$daemon" >/dev/null
           grep --fixed-strings 'sudo -v' "$daemon" >/dev/null
+          grep --fixed-strings 'data_dir="/var/tmp/agent-sandbox-docker-$uid-$project_id"' "$runner" >/dev/null
+          grep --fixed-strings 'findmnt --raw --noheadings --output TARGET' "$runner" >/dev/null
+          grep --fixed-strings 'umount --lazy "$mount_target"' "$runner" >/dev/null
+          test "$(grep --count --fixed-strings 'unmount_tree "$daemon_dir"' "$runner")" -eq 2
+          test "$(grep --count --fixed-strings 'unmount_tree "$data_dir"' "$runner")" -eq 2
           touch "$out"
         '';
         exercise-image = agentSandboxChecks.exerciseImage;
