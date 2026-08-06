@@ -104,7 +104,9 @@ _: {
           pkgs.coreutils
           pkgs.skopeo
         ];
-        text = builtins.readFile ../../scripts/publish-image.sh;
+        text = lib.removePrefix "#!/usr/bin/env nix-shell\n" (
+          builtins.readFile ../../scripts/publish-image.sh
+        );
       };
 
       nspawnApp = pkgs.writeShellApplication {

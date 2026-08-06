@@ -1,4 +1,7 @@
-#!/usr/bin/env bash
+#!/usr/bin/env nix-shell
+# shellcheck shell=bash
+#! nix-shell -i bash
+#! nix-shell -p bash coreutils skopeo
 
 archive=${1:?usage: publish-image OCI_ARCHIVE VERSION}
 version=${2:?usage: publish-image OCI_ARCHIVE VERSION}
