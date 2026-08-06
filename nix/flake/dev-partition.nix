@@ -13,58 +13,117 @@
       ...
     }:
     let
-      startPodmanService = pkgs.writeShellApplication {
-        name = "agent-podman-service";
+      runDockerDaemon = pkgs.writeShellApplication {
+        name = "agent-dockerd-runner";
         runtimeInputs = [
           pkgs.coreutils
-          pkgs.gnugrep
-          pkgs.podman
-          pkgs.systemd
+          pkgs.docker
         ];
         text = ''
-          runtime_dir="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-          socket_dir="$runtime_dir/podman"
-          socket="$socket_dir/podman.sock"
-          marker=/run/agent-sandbox-podman-delegation
+          owner_pid=$1
+          watch_cwd=$2
+          project_root=$3
+          uid="''${SUDO_UID:?agent-dockerd-runner must run through sudo}"
+          gid="''${SUDO_GID:?agent-dockerd-runner must run through sudo}"
+          daemon_dir="/run/user/$uid/agent-sandbox-docker-$owner_pid"
+          pidfile="$daemon_dir/dockerd.pid"
+          bridge="asd-$owner_pid"
+          bridge_subnet="10.254.$((owner_pid % 200 + 20)).1/24"
 
-          mkdir -p "$socket_dir"
-
-          # Match the neocache development shell's runtime cgroup delegation.
-          # The drop-in and marker live under /run and disappear on reboot.
-          if [[ ! -e "$marker" ]]; then
-            if [[ " $(id -Gn) " != *" wheel "* ]]; then
-              echo 'Podman setup requires membership in the wheel group.' >&2
-              exit 1
+          cleanup() {
+            if [[ -n "''${daemon_pid:-}" ]]; then
+              kill "$daemon_pid" 2>/dev/null || true
+              wait "$daemon_pid" 2>/dev/null || true
             fi
-            if ! command -v sudo >/dev/null; then
-              echo 'Podman setup requires the host sudo wrapper.' >&2
-              exit 1
+            rm -rf "$daemon_dir"
+          }
+          trap cleanup EXIT INT TERM
+
+          install -d -m 0750 -o root -g "$gid" "$daemon_dir"
+          printf '%s\n' "$$" >"$daemon_dir/runner.pid"
+
+          dockerd \
+            --bip "$bridge_subnet" \
+            --bridge "$bridge" \
+            --data-root "$daemon_dir/data" \
+            --exec-root "$daemon_dir/exec" \
+            --group "$gid" \
+            --host "unix://$daemon_dir/docker.sock" \
+            --pidfile "$pidfile" &
+          daemon_pid=$!
+
+          while kill -0 "$owner_pid" 2>/dev/null && kill -0 "$daemon_pid" 2>/dev/null; do
+            if [[ "$watch_cwd" == 1 ]]; then
+              owner_cwd=$(readlink -f "/proc/$owner_pid/cwd" 2>/dev/null || true)
+              [[ "$owner_cwd" == "$project_root" || "$owner_cwd" == "$project_root/"* ]] || break
             fi
+            sleep 1
+          done
+        '';
+      };
 
-            echo 'Authorizing ephemeral rootless Podman setup for this boot.' >&2
-            sudo -v
-            printf '[Service]\nDelegate=cpu cpuset io memory pids\n' \
-              | sudo tee /run/systemd/system/user@.service.d/agent-sandbox.conf >/dev/null
-            sudo systemctl daemon-reload
-            sudo touch "$marker"
-          fi
+      startDockerDaemon = pkgs.writeShellApplication {
+        name = "agent-docker-daemon";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.docker-client
+        ];
+        text = ''
+          owner_pid=$1
+          watch_cwd=$2
+          project_root=$3
+          uid=$(id -u)
+          daemon_dir="/run/user/$uid/agent-sandbox-docker-$owner_pid"
+          socket="$daemon_dir/docker.sock"
+          log="/run/user/$uid/agent-sandbox-dockerd-$owner_pid.log"
+          docker_host="unix://$socket"
 
-          if [[ -S "$socket" ]]; then
+          [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] || {
+            echo 'Docker daemon owner PID must be a positive integer.' >&2
+            exit 1
+          }
+
+          if [[ -S "$socket" ]] && docker --host "$docker_host" info >/dev/null 2>&1; then
             exit 0
           fi
 
-          if ! systemctl --user is-active --quiet agent-sandbox-podman.service; then
-            systemd-run --user --quiet --unit=agent-sandbox-podman \
-              --property=Delegate=yes \
-              podman --log-level=error system service --time=0 "unix://$socket"
+          if [[ " $(id -Gn) " != *" wheel "* ]]; then
+            echo 'The ephemeral Docker daemon requires membership in the wheel group.' >&2
+            exit 1
+          fi
+          if ! command -v sudo >/dev/null; then
+            echo 'The ephemeral Docker daemon requires the host sudo wrapper.' >&2
+            exit 1
           fi
 
-          for _ in $(seq 1 50); do
-            [[ -S "$socket" ]] && exit 0
+          echo 'Authorizing the ephemeral Docker daemon for this development shell.' >&2
+          sudo -v
+
+          if [[ -f "$daemon_dir/runner.pid" ]]; then
+            sudo kill "$(<"$daemon_dir/runner.pid")" 2>/dev/null || true
+            sleep 0.2
+          fi
+          sudo rm -rf "$daemon_dir"
+          : >"$log"
+
+          # The caller opens its user-owned log before sudo starts the runner.
+          # shellcheck disable=SC2024
+          sudo -b ${runDockerDaemon}/bin/agent-dockerd-runner \
+            "$owner_pid" "$watch_cwd" "$project_root" \
+            >"$log" 2>&1
+
+          for _ in $(seq 1 100); do
+            if [[ -S "$socket" ]] && docker --host "$docker_host" info >/dev/null 2>&1; then
+              exit 0
+            fi
             sleep 0.1
           done
 
-          echo "Podman's Docker-compatible socket did not appear at $socket" >&2
+          echo "Docker's socket did not become ready at $socket" >&2
+          tail -n 20 "$log" >&2
+          if [[ -f "$daemon_dir/runner.pid" ]]; then
+            sudo kill "$(<"$daemon_dir/runner.pid")" 2>/dev/null || true
+          fi
           exit 1
         '';
       };
@@ -127,8 +186,10 @@
 
       devShells.default = pkgs.mkShell {
         packages = [
+          startDockerDaemon
           pkgs.cargo
           pkgs.clippy
+          pkgs.docker-client
           pkgs.nixd
           pkgs.podman
           pkgs.podman-compose
@@ -138,11 +199,17 @@
         shellHook = ''
           ${config.pre-commit.installationScript}
           export XDG_RUNTIME_DIR="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-          export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
-          export DOCKER_SOCK="$XDG_RUNTIME_DIR/podman/podman.sock"
+          docker_owner_pid="''${AGENT_SANDBOX_DIRENV_OWNER_PID:-$$}"
+          docker_watch_cwd="''${AGENT_SANDBOX_DIRENV_ACTIVE:-0}"
+          docker_project_root="''${AGENT_SANDBOX_PROJECT_ROOT:-$PWD}"
+          export DOCKER_SOCK="$XDG_RUNTIME_DIR/agent-sandbox-docker-$docker_owner_pid/docker.sock"
+          export DOCKER_HOST="unix://$DOCKER_SOCK"
 
-          if [[ -z "''${CI:-}" && "''${AGENT_SANDBOX_SKIP_PODMAN_SERVICE:-}" != 1 ]]; then
-            ${startPodmanService}/bin/agent-podman-service
+          if [[ -z "''${CI:-}" \
+            && "''${AGENT_SANDBOX_DIRENV_ACTIVE:-}" != 1 \
+            && "''${AGENT_SANDBOX_SKIP_DOCKER_DAEMON:-}" != 1 ]]; then
+            agent-docker-daemon \
+              "$docker_owner_pid" "$docker_watch_cwd" "$docker_project_root"
           fi
         '';
       };

@@ -12,9 +12,9 @@ Install Nix with flakes enabled. Enter the development environment:
 nix develop
 ```
 
-The first shell activation after each reboot asks for wheel authorization. It installs a cgroup delegation drop-in under `/run`, then starts a rootless, Docker-compatible Podman API as the transient `agent-sandbox-podman.service` user unit. The service lasts for the user session; neither the drop-in nor its marker survives a reboot. Set `AGENT_SANDBOX_SKIP_PODMAN_SERVICE=1` on hosts where service startup is not wanted.
+The shell provides two separate container runtimes. `podman` runs rootless without setup or authorization. The `docker` client connects to a project-local Docker daemon started directly by the shell, not by a systemd unit. Starting that rootful daemon asks for wheel authorization. Its socket, process files, and storage live under `/run/user/$UID/agent-sandbox-docker-$PID` and are removed when the development shell exits.
 
-With nix-direnv installed, `direnv allow` activates the same shell when entering the repository. The shell includes Cargo, Clippy, rustfmt, Podman, and podman-compose and exports `DOCKER_HOST` and `DOCKER_SOCK` for the rootless Podman socket.
+With nix-direnv installed, `direnv allow` activates the same environment when entering the repository. Each interactive shell gets its own Docker daemon; leaving the repository or closing that shell stops it. The shell exports `DOCKER_HOST` and `DOCKER_SOCK` for its Docker socket. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` when only rootless Podman is needed.
 
 ## Build and check
 
@@ -29,11 +29,15 @@ The root flake follows the consumer-clean structure from `nix-project-template`:
 
 ## Run containers
 
-Load the Nix-built OCI archive into Podman:
+Load the Nix-built OCI archive into either runtime:
 
 ```console
 podman load < "$(nix build --no-link --print-out-paths .#agent-image)"
 podman run --rm --publish 8080:8080 ghcr.io/johnrichardrinehart/agent-sandbox:latest
+
+# Or use the shell's ephemeral Docker daemon.
+docker load < "$(nix build --no-link --print-out-paths .#agent-image)"
+docker run --rm --publish 8080:8080 ghcr.io/johnrichardrinehart/agent-sandbox:latest
 ```
 
 The compatibility Dockerfile and Compose definition run through rootless Podman:
