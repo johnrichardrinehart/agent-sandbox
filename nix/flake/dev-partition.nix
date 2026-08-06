@@ -188,7 +188,9 @@
         agent-systemd-nspawn = agentSandboxChecks.nspawnApp;
         cargo-clippy = agentSandboxChecks.clippyCheck;
         compose = agentSandboxChecks.composeCheck;
+        exercise-image = agentSandboxChecks.exerciseImage;
         publish-image = agentSandboxChecks.publishImage;
+        script-shebangs = agentSandboxChecks.scriptShebangCheck;
         sourcehut-manifest = agentSandboxChecks.sourcehutManifestCheck;
       };
 

@@ -49,6 +49,27 @@ podman-compose down
 
 Both images run as `sandbox-manager`, use `/home/user` as the home and working directory, preinstall the Python libraries declared in `pyproject.toml`, and start `agent-sandbox` as their entrypoint. The single-stage compatibility Dockerfile uses the pinned `nixos/nix:2.35.1` base and the locked flake to build the same Nix runtime package set as the OCI image; it does not use a Python base, apt, pip, or uv. `uv.lock` pins the separate Python project environment. Compose references `ghcr.io/johnrichardrinehart/agent-sandbox:latest`; `--build` replaces it locally with the compatibility Dockerfile build.
 
+Exercise a running gRPC image with the packaged smoke test:
+
+```console
+nix run .#exercise-image
+```
+
+The source script provides the same zero-setup behavior:
+
+```console
+./scripts/exercise-image.sh
+```
+
+The script uses a `nix-shell` shebang to provide Bash and `grpcurl` when executed on a Nix system. Without Nix, install Bash and `grpcurl`, then run `bash scripts/exercise-image.sh`; the `nix-shell` directives are ordinary shell comments in that mode. The script checks reflection and both health APIs, then writes and reads a fixture and runs a Python command through the control planes. Its optional settings are:
+
+| Variable                | Default          | Purpose                                                                              |
+| ----------------------- | ---------------- | ------------------------------------------------------------------------------------ |
+| `AGENT_SANDBOX_ADDRESS` | `127.0.0.1:8080` | Select another gRPC host and port.                                                   |
+| `GRPCURL_FLAGS`         | `-plaintext`     | Supply whitespace-separated `grpcurl` transport options, such as `-cacert ./ca.pem`. |
+
+The service itself listens on `0.0.0.0:8080` by default. Set `AGENT_SANDBOX_LISTEN` when starting the binary or container to change its bind address. The development shell chooses a project-local Docker socket and exports `DOCKER_HOST` and `DOCKER_SOCK`; normal Docker commands need no socket options. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` before entering the shell when using only Podman or an independently managed runtime.
+
 ## Continuous integration
 
 GitHub Actions remains a check-only adapter. SourceHut runs the same `nix flake check --print-build-logs` contract from [`.build.yml`](.build.yml), builds the Nix OCI archive, and publishes only `refs/heads/main` to GHCR. Other SourceHut branches build and test the image but cannot publish it.

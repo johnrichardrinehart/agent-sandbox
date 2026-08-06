@@ -109,6 +109,14 @@ _: {
         );
       };
 
+      exerciseImage = pkgs.writeShellApplication {
+        name = "exercise-agent-image";
+        runtimeInputs = [ pkgs.grpcurl ];
+        text = lib.removePrefix "#!/usr/bin/env nix-shell\n" (
+          builtins.readFile ../../scripts/exercise-image.sh
+        );
+      };
+
       nspawnApp = pkgs.writeShellApplication {
         name = "agent-systemd-nspawn";
         runtimeInputs = [ pkgs.systemd ];
@@ -166,6 +174,14 @@ _: {
         '';
       };
 
+      scriptShebangCheck = pkgs.runCommand "agent-sandbox-script-shebang-check" { } ''
+        for script in ${../../scripts}/*.sh; do
+          test "$(head -n 1 "$script")" = '#!/usr/bin/env nix-shell'
+          grep --fixed-strings --line-regexp '#! nix-shell -i bash' "$script" >/dev/null
+        done
+        touch "$out"
+      '';
+
       sourcehutManifestCheck =
         pkgs.runCommand "agent-sandbox-sourcehut-manifest-check"
           {
@@ -212,6 +228,7 @@ _: {
         agent-rootfs = agentRootfs;
         agent-runtime = agentRuntime;
         agent-systemd-nspawn = nspawnApp;
+        exercise-image = exerciseImage;
         publish-image = publishImage;
       };
 
@@ -219,6 +236,10 @@ _: {
         agent-systemd-nspawn = {
           program = lib.getExe nspawnApp;
           meta.description = "Run agent-sandbox in an ephemeral systemd-nspawn unit";
+        };
+        exercise-image = {
+          program = lib.getExe exerciseImage;
+          meta.description = "Exercise a running agent sandbox OCI image";
         };
         publish-image = {
           program = lib.getExe publishImage;
@@ -235,8 +256,10 @@ _: {
           agentRootfs
           clippyCheck
           composeCheck
+          exerciseImage
           nspawnApp
           publishImage
+          scriptShebangCheck
           sourcehutManifestCheck
           ;
         agentPackage = agent;
