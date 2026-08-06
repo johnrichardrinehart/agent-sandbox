@@ -327,6 +327,7 @@
           pkgs.cargo
           pkgs.clippy
           pkgs.docker-client
+          pkgs.grpcurl
           pkgs.nixd
           pkgs.podman
           pkgs.podman-compose
