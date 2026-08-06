@@ -179,7 +179,7 @@ Restic preserves regular files, empty directories, symbolic and hard links, perm
 
 A plain-HTTP S3-compatible service uses a repository URL that starts with `s3:http://`. Compose passes the backup variables to the container.
 
-Compose uses [`seccomp.json`](seccomp.json), which is based on the Moby default profile at commit `f9bc03ec19b2dc4c091449b08e88f85c0caa9f0b`. The profile adds only the namespace, mount, and root-switch system calls that Bubblewrap needs. Compose also drops all container capabilities. See [CAVEATS.md](CAVEATS.md) for filesystem, repository, and kernel limits.
+Compose uses [`seccomp.json`](seccomp.json), which is based on the Moby default profile at commit `f9bc03ec19b2dc4c091449b08e88f85c0caa9f0b`. Docker's default profile blocks the namespace system calls that Bubblewrap needs, so this profile permits them. Bubblewrap keeps the container filesystem read-only and scopes persistent writes to `/home/user` (with temporary `/tmp` and `/var/tmp` filesystems); Compose also drops all container capabilities. This makes the additional syscall access narrow in practice, but it still increases kernel attack surface. See [CAVEATS.md](CAVEATS.md) for filesystem, repository, and kernel limits.
 
 ## Project checks and continuous integration
 
