@@ -234,6 +234,10 @@ _: {
             mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$out"
             podman-compose --file ${../../docker-compose.yaml} config > "$out/standard.yaml"
             podman-compose --file ${../../docker-compose-dev.yaml} config > "$out/development.yaml"
+            grep --fixed-strings 'RESTIC_REPOSITORY: s3:http://s3:9000/agent-sandbox/home' "$out/development.yaml" >/dev/null
+            if grep --fixed-strings 'AGENT_SANDBOX_S3_ENDPOINT' "$out/development.yaml" >/dev/null; then
+              exit 1
+            fi
             grep --fixed-strings 'while ! nix build --out-link /opt/agent-runtime .#agent-runtime; do' ${../../Dockerfile} >/dev/null
             grep --fixed-strings '[ "$build_attempt" -lt 3 ] || exit 1;' ${../../Dockerfile} >/dev/null
           '';

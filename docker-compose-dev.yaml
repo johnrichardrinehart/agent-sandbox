@@ -50,14 +50,13 @@ services:
         condition: service_completed_successfully
     environment:
       AGENT_SANDBOX_LISTEN: 0.0.0.0:8080
-      AGENT_SANDBOX_S3_BUCKET: ${AGENT_SANDBOX_S3_BUCKET:-agent-sandbox}
-      AGENT_SANDBOX_S3_ENDPOINT: http://s3:9000
-      AGENT_SANDBOX_S3_PREFIX: ${AGENT_SANDBOX_S3_PREFIX:-home}
+      AGENT_SANDBOX_BACKUP_HOST: ${AGENT_SANDBOX_BACKUP_HOST:-agent-sandbox}
+      AGENT_SANDBOX_BACKUP_INTERVAL_SECONDS: ${AGENT_SANDBOX_BACKUP_INTERVAL_SECONDS:-300}
       AWS_ACCESS_KEY_ID: agent-sandbox
-      AWS_ALLOW_HTTP: "true"
       AWS_DEFAULT_REGION: us-east-1
       AWS_SECRET_ACCESS_KEY: agent-sandbox-dev-password
-      AWS_SKIP_SIGNATURE: "false"
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD:-agent-sandbox}
+      RESTIC_REPOSITORY: s3:http://s3:9000/${AGENT_SANDBOX_S3_BUCKET:-agent-sandbox}/home
     ports:
       - "8080:8080"
     cap_drop:
@@ -67,7 +66,7 @@ services:
     restart: unless-stopped
     security_opt:
       - seccomp=${AGENT_SANDBOX_SECCOMP_PROFILE:-./seccomp.json}
-    stop_grace_period: 30s
+    stop_grace_period: 5m
     healthcheck:
       test:
         - CMD
