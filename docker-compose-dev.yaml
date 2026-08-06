@@ -1,0 +1,86 @@
+services:
+  s3:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: agent-sandbox
+      MINIO_ROOT_PASSWORD: agent-sandbox-dev-password
+    volumes:
+      - s3-data:/data
+    networks:
+      - agent-sandbox-dev
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:9000/minio/health/live
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+    restart: unless-stopped
+
+  s3-init:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      s3:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: agent-sandbox
+      MINIO_ROOT_PASSWORD: agent-sandbox-dev-password
+      AGENT_SANDBOX_S3_BUCKET: ${AGENT_SANDBOX_S3_BUCKET:-agent-sandbox}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://s3:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "local/$${AGENT_SANDBOX_S3_BUCKET}"
+    networks:
+      - agent-sandbox-dev
+    restart: "no"
+
+  agent:
+    build:
+      context: .
+    image: agent-sandbox:dev
+    depends_on:
+      s3-init:
+        condition: service_completed_successfully
+    environment:
+      AGENT_SANDBOX_LISTEN: 0.0.0.0:8080
+      AGENT_SANDBOX_S3_BUCKET: ${AGENT_SANDBOX_S3_BUCKET:-agent-sandbox}
+      AGENT_SANDBOX_S3_ENDPOINT: http://s3:9000
+      AGENT_SANDBOX_S3_PREFIX: ${AGENT_SANDBOX_S3_PREFIX:-home}
+      AWS_ACCESS_KEY_ID: agent-sandbox
+      AWS_ALLOW_HTTP: "true"
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_SECRET_ACCESS_KEY: agent-sandbox-dev-password
+      AWS_SKIP_SIGNATURE: "false"
+    ports:
+      - "8080:8080"
+    cap_drop:
+      - ALL
+    networks:
+      - agent-sandbox-dev
+    restart: unless-stopped
+    security_opt:
+      - seccomp=${AGENT_SANDBOX_SECCOMP_PROFILE:-./seccomp.json}
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 8080), timeout=2).close()"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 2s
+
+networks:
+  agent-sandbox-dev:
+
+volumes:
+  s3-data:

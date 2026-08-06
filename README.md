@@ -55,7 +55,16 @@ podman-compose up --build
 podman-compose down
 ```
 
-Both images run as `sandbox-manager`, use `/home/user` as the home and working directory, preinstall the Python libraries declared in `pyproject.toml`, and start `agent-sandbox` as their entrypoint. The single-stage compatibility Dockerfile uses the pinned `nixos/nix:2.35.1` base and the locked flake to build the same Nix runtime package set as the OCI image; it does not use a Python base, apt, pip, or uv. `uv.lock` pins the separate Python project environment. Compose references `ghcr.io/johnrichardrinehart/agent-sandbox:latest`; `--build` replaces it locally with the compatibility Dockerfile build.
+Use the development Compose file to build the service and start a local MinIO store:
+
+```console
+docker compose -f ./docker-compose-dev.yaml up --build
+docker compose -f ./docker-compose-dev.yaml down
+```
+
+Compose waits for MinIO, creates the S3 bucket, and then starts the service. The MinIO volume keeps files after `down`. Use `down --volumes` to delete these files.
+
+The Nix and compatibility service images run as `sandbox-manager`, use `/home/user` as the home and working directory, preinstall the Python libraries declared in `pyproject.toml`, and start `agent-sandbox` as their entrypoint. The single-stage compatibility Dockerfile uses the pinned `nixos/nix:2.35.1` base and the locked flake to build the same Nix runtime package set as the OCI image; it does not use a Python base, apt, pip, or uv. `uv.lock` pins the separate Python project environment. The standard Compose file references `ghcr.io/johnrichardrinehart/agent-sandbox:latest`; `--build` replaces it locally with the compatibility Dockerfile build. The development Compose file tags its local build as `agent-sandbox:dev`.
 
 Exercise a running gRPC image with the packaged smoke test:
 
