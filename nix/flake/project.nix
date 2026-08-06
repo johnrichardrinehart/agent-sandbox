@@ -226,30 +226,76 @@ _: {
       # Keep this test as an explicit package rather than a flake check. CI runs
       # `nix flake check`, so it evaluates but does not build the expensive VM.
       nixosVmTest = pkgs.testers.runNixOSTest {
-        name = "agent-sandbox-docker";
+        name = "agent-sandbox-cluster";
 
-        nodes.machine =
-          { pkgs, ... }:
-          {
-            virtualisation = {
-              docker.enable = true;
-              diskSize = 8192;
-              memorySize = 2048;
+        nodes = {
+          machine =
+            { pkgs, ... }:
+            {
+              virtualisation = {
+                docker.enable = true;
+                diskSize = 8192;
+                memorySize = 2048;
+              };
+              environment.systemPackages = [
+                pkgs.docker-compose
+                pkgs.grpcurl
+                pkgs.jq
+              ];
             };
-            environment.systemPackages = [
-              pkgs.docker-compose
-              pkgs.grpcurl
-            ];
-          };
+
+          storage =
+            { pkgs, ... }:
+            {
+              systemd.services.seaweedfs = {
+                wantedBy = [ "multi-user.target" ];
+                after = [ "network.target" ];
+                serviceConfig = {
+                  DynamicUser = true;
+                  StateDirectory = "seaweedfs";
+                  ExecStart = "${pkgs.seaweedfs}/bin/weed server -dir=/var/lib/seaweedfs -ip=127.0.0.1 -ip.bind=0.0.0.0 -master.port=19333 -volume.port=18080 -filer -filer.port=18888 -s3 -s3.port=9000";
+                };
+              };
+              networking.firewall.allowedTCPPorts = [ 9000 ];
+              environment.systemPackages = [ pkgs.curl ];
+            };
+        };
 
         testScript = ''
           start_all()
           machine.wait_for_unit("docker.service")
-          machine.succeed("docker load < ${agentImage}")
-          machine.succeed(
-              "docker-compose --project-name agent-sandbox "
-              "--file ${../../docker-compose.yaml} up --detach --no-build"
+          storage.wait_for_unit("seaweedfs.service")
+          storage.wait_until_succeeds(
+              "curl --fail --silent http://127.0.0.1:9000 >/dev/null"
           )
+          storage.succeed(
+              "curl --fail --silent --request PUT "
+              "http://127.0.0.1:9000/agent-sandbox"
+          )
+          storage.succeed("printf startup-sync >/tmp/from-s3.txt")
+          storage.succeed(
+              "curl --fail --silent --request PUT "
+              "--data-binary @/tmp/from-s3.txt "
+              "http://127.0.0.1:9000/agent-sandbox/home/from-s3.txt"
+          )
+          machine.succeed("docker load < ${agentImage}")
+
+          storage_ip = storage.succeed(
+              "ip -4 -o address show dev eth1 | awk '{print $4}' | cut -d/ -f1"
+          ).strip()
+          compose_env = (
+              "AGENT_SANDBOX_S3_BUCKET=agent-sandbox "
+              f"AGENT_SANDBOX_S3_ENDPOINT=http://{storage_ip}:9000 "
+              "AGENT_SANDBOX_S3_PREFIX=home "
+              "AWS_DEFAULT_REGION=us-east-1 AWS_ALLOW_HTTP=true "
+              "AWS_SKIP_SIGNATURE=true "
+          )
+          compose = (
+              compose_env
+              + "docker-compose --project-name agent-sandbox "
+              + "--file ${../../docker-compose.yaml} "
+          )
+          machine.succeed(compose + "up --detach --no-build")
           machine.wait_until_succeeds(
               "grpcurl -plaintext 127.0.0.1:8080 list "
               "sandbox.v0.FilesystemService | grep WriteFile"
@@ -268,6 +314,78 @@ _: {
           )
           machine.succeed(
               "test \"$(docker ps --filter status=running --format '{{.Names}}' | wc -l)\" -eq 1"
+          )
+
+          def write_file(source, destination):
+              machine.succeed(
+                  f"payload=$(base64 -w0 {source}); "
+                  f"request=$(jq -nc --arg path '{destination}' --arg content \"$payload\" "
+                  "'{path:$path,content:$content,createParents:true}'); "
+                  "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+                  "sandbox.v0.FilesystemService/WriteFile >/dev/null"
+              )
+              machine.succeed(
+                  f"request=$(jq -nc --arg path '{destination}' '{{path:$path}}'); "
+                  "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+                  "sandbox.v0.FilesystemService/ReadFile "
+                  f"| jq -r .content | base64 -d | cmp - {source}"
+              )
+
+          def execute_script(script, expected, stream="stdout"):
+              machine.succeed(
+                  f"request=$(jq -nc --arg script '{script}' "
+                  "'{argv:[\"python\",$script],timeoutMs:\"120000\"}'); "
+                  "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+                  "sandbox.v0.CommandService/ExecuteCommand >/tmp/command.json; "
+                  "test \"$(jq -r '.exitCode // 0' /tmp/command.json)\" -eq 0; "
+                  f"jq -r .{stream} /tmp/command.json | base64 -d | grep -F '{expected}'"
+              )
+
+          machine.succeed(
+              "grpcurl -plaintext -d '{\"path\":\"from-s3.txt\"}' "
+              "127.0.0.1:8080 sandbox.v0.FilesystemService/ReadFile "
+              "| jq -r .content | base64 -d | grep -Fx startup-sync"
+          )
+          machine.fail(
+              "grpcurl -plaintext -d "
+              "'{\"path\":\"../escape.txt\",\"content\":\"\"}' "
+              "127.0.0.1:8080 sandbox.v0.FilesystemService/WriteFile"
+          )
+
+          write_file("${../../csv_transform.py}", "csv_transform.py")
+          write_file("${../../linked_list.py}", "linked_list.py")
+          write_file("${../../ocr_demo.py}", "ocr_demo.py")
+          execute_script("csv_transform.py", "wrote summary.csv")
+          execute_script("linked_list.py", "OK", "stderr")
+          execute_script("ocr_demo.py", "OCR round trip OK")
+
+          machine.succeed(
+              "code=\"import sys; print('bad', file=sys.stderr); raise SystemExit(7)\"; "
+              "request=$(jq -nc --arg code \"$code\" "
+              "'{argv:[\"python\",\"-c\",$code]}'); "
+              "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+              "sandbox.v0.CommandService/ExecuteCommand >/tmp/failure.json; "
+              "test \"$(jq -r .exitCode /tmp/failure.json)\" -eq 7; "
+              "jq -r .stderr /tmp/failure.json | base64 -d | grep -Fx bad"
+          )
+
+          machine.succeed(
+              "request=$(jq -nc --arg path persisted.txt --arg content cGVyc2lzdGVk "
+              "'{path:$path,content:$content}'); "
+              "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+              "sandbox.v0.FilesystemService/WriteFile >/dev/null"
+          )
+          machine.succeed(compose + "down")
+          storage.wait_until_succeeds(
+              "test \"$(curl --fail --silent "
+              "http://127.0.0.1:9000/agent-sandbox/home/persisted.txt)\" "
+              "= persisted"
+          )
+          machine.succeed(compose + "up --detach --no-build")
+          machine.wait_until_succeeds(
+              "grpcurl -plaintext -d '{\"path\":\"persisted.txt\"}' "
+              "127.0.0.1:8080 sandbox.v0.FilesystemService/ReadFile "
+              "| jq -r .content | base64 -d | grep -Fx persisted"
           )
         '';
       };

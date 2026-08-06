@@ -2,7 +2,7 @@
 
 Agent sandbox is a Nix-built container service for running coding-agent workloads as an unprivileged user. This bootstrap provides the Rust service package, OCI image, rootless Podman environment, Docker Compose compatibility, and an ephemeral `systemd-nspawn` runner.
 
-The service exposes gRPC reflection and the standard gRPC health service on port 8080. The versioned API in [`proto/v0`](proto/v0) defines filesystem and command control planes. Their handlers currently return `UNIMPLEMENTED`. The health service reports both control planes as `SERVING`.
+The service exposes the versioned API in [`proto/v0`](proto/v0), gRPC reflection, and the standard gRPC health service on port 8080. Filesystem calls read and write small files under `/home/user`. Command calls start a fresh process and return its standard output, standard error, and exit code. The service rejects paths that escape `/home/user`, including symlink escapes.
 
 ## Set up
 
@@ -31,7 +31,7 @@ Run the Docker-in-NixOS integration test explicitly:
 nix build .#nixos-vm-test -L
 ```
 
-The VM starts `docker.service`, loads the Nix-built image, starts the single Compose service, and checks both gRPC control planes from the host with `grpcurl`.
+The VM test uses a two-node cluster. The `machine` node runs `docker.service` and the single Compose container. The separate `storage` node runs the SeaweedFS S3 service. The test sets `AGENT_SANDBOX_S3_ENDPOINT` to the storage node address, verifies startup and shutdown synchronization, and uses host-side `grpcurl` calls to test file access, path confinement, command failures, and all three acceptance scripts.
 
 The root flake follows the consumer-clean structure from `nix-project-template`: package and image definitions live under `nix/flake/`, while formatters, hooks, and shell tools are isolated in `dev/`.
 
@@ -77,6 +77,31 @@ The script uses a `nix-shell` shebang to provide Bash and `grpcurl` when execute
 | `GRPCURL_FLAGS`         | `-plaintext`     | Supply whitespace-separated `grpcurl` transport options, such as `-cacert ./ca.pem`. |
 
 The service itself listens on `0.0.0.0:8080` by default. Set `AGENT_SANDBOX_LISTEN` when starting the binary or container to change its bind address. The development shell chooses a project-local Docker socket and exports `DOCKER_HOST` and `DOCKER_SOCK`; normal Docker commands need no socket options. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` before entering the shell when using only Podman or an independently managed runtime.
+
+## Call the service
+
+Reflection lets `grpcurl` call the service without local descriptor files:
+
+```console
+grpcurl -plaintext 127.0.0.1:8080 list sandbox.v0.FilesystemService
+grpcurl -plaintext -d '{"path":"notes.txt","content":"aGVsbG8="}' \
+  127.0.0.1:8080 sandbox.v0.FilesystemService/WriteFile
+grpcurl -plaintext -d '{"argv":["python","-c","print(6 * 7)"]}' \
+  127.0.0.1:8080 sandbox.v0.CommandService/ExecuteCommand
+```
+
+Protocol Buffer `bytes` fields use base64 in JSON. `ExecuteCommand.argv` bypasses the shell; request a shell explicitly when shell syntax is needed. The optional working directory is relative to `/home/user`, and command timeouts default to 30 seconds with a five-minute maximum.
+
+## Configure S3 synchronization
+
+Set `AGENT_SANDBOX_S3_BUCKET` to enable persistence. The service downloads the configured prefix before accepting requests and uploads `/home/user` after `SIGTERM` or `SIGINT`. These variables configure the store:
+
+- `AGENT_SANDBOX_S3_BUCKET`: bucket name; an empty value disables persistence.
+- `AGENT_SANDBOX_S3_PREFIX`: object prefix, defaulting to `home`.
+- `AGENT_SANDBOX_S3_ENDPOINT`: optional S3-compatible endpoint for services such as MinIO.
+- Standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables provide credentials and region. Set `AWS_ALLOW_HTTP=true` for a plain-HTTP local endpoint or `AWS_SKIP_SIGNATURE=true` for an anonymous test service.
+
+Compose passes these variables into its single container and maps `host.docker.internal` to the host gateway, so a host S3-compatible service can be used without adding another Compose service.
 
 ## Continuous integration
 
