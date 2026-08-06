@@ -4,7 +4,12 @@ ENV NIX_CONFIG="experimental-features = nix-command flakes"
 WORKDIR /build
 COPY . .
 RUN mkdir -p /opt /home/user /tmp \
-    && nix build --out-link /opt/agent-runtime .#agent-runtime \
+    && build_attempt=1 \
+    && while ! nix build --out-link /opt/agent-runtime .#agent-runtime; do \
+      [ "$build_attempt" -lt 3 ] || exit 1; \
+      build_attempt=$((build_attempt + 1)); \
+      sleep 5; \
+    done \
     && printf '%s\n' \
       'sandbox-manager:x:10001:10001:Sandbox manager:/home/user:/bin/sh' \
       >>/etc/passwd \

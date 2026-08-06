@@ -231,8 +231,11 @@ _: {
           ''
             export HOME="$TMPDIR/home"
             export XDG_RUNTIME_DIR="$TMPDIR/run"
-            mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
-            podman-compose --file ${../../docker-compose.yaml} config > "$out"
+            mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$out"
+            podman-compose --file ${../../docker-compose.yaml} config > "$out/standard.yaml"
+            podman-compose --file ${../../docker-compose-dev.yaml} config > "$out/development.yaml"
+            grep --fixed-strings 'while ! nix build --out-link /opt/agent-runtime .#agent-runtime; do' ${../../Dockerfile} >/dev/null
+            grep --fixed-strings '[ "$build_attempt" -lt 3 ] || exit 1;' ${../../Dockerfile} >/dev/null
           '';
 
       # Keep this test as an explicit package rather than a flake check. CI runs
