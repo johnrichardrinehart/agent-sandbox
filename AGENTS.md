@@ -4,6 +4,10 @@
 
 - Do not modify `INSTRUCTIONS.md`. Preserve its exact contents and hash across every revision.
 
+## Writing standard
+
+- You must use ASD-STE100 Simplified Technical English for commit messages, pull request descriptions, Markdown prose, and source code comments.
+
 ## CI monitoring
 
 - Push every `main` update to both `origin` (GitHub) and `fork` (SourceHut). Pushing only to `origin` does not trigger the SourceHut build.
