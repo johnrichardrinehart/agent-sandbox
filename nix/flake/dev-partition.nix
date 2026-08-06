@@ -157,22 +157,24 @@
             exit 1
           fi
 
-          sudo_arguments=()
-          if [[ "$watch_cwd" == 1 ]]; then
-            sudo_arguments+=(--non-interactive)
-          else
-            echo 'Authorizing the ephemeral Docker daemon for this development shell.' >&2
-          fi
-          sudo "''${sudo_arguments[@]}" -v
+          echo 'Authorizing the ephemeral Docker daemon for this development shell.' >&2
+          sudo -v
 
           : >"$log"
 
-          # The runner serializes replacement and validates stale PIDs before
-          # killing them. The caller opens its user-owned log before sudo.
-          # shellcheck disable=SC2024
-          sudo "''${sudo_arguments[@]}" -b ${runDockerDaemon}/bin/agent-dockerd-runner \
-            "$owner_pid" "$watch_cwd" "$project_root" "$project_id" \
-            >"$log" 2>&1
+          # Close inherited file descriptors before sudo starts the runner.
+          # Long-lived processes can keep direnv's internal pipes open.
+          ${pkgs.bash}/bin/bash -c '
+            exec </dev/null >"$1" 2>&1
+            for fd_path in /proc/$$/fd/*; do
+              fd="''${fd_path##*/}"
+              [[ "$fd" =~ ^[0-9]+$ && "$fd" -ge 3 ]] || continue
+              eval "exec $fd>&-"
+            done
+            exec sudo --non-interactive --background "$2" \
+              "$3" "$4" "$5" "$6"
+          ' _ "$log" ${runDockerDaemon}/bin/agent-dockerd-runner \
+            "$owner_pid" "$watch_cwd" "$project_root" "$project_id"
 
           for _ in $(seq 1 100); do
             if [[ -S "$socket" ]] && docker --host "$docker_host" info >/dev/null 2>&1; then
@@ -239,10 +241,11 @@
         agent-systemd-nspawn = agentSandboxChecks.nspawnApp;
         cargo-clippy = agentSandboxChecks.clippyCheck;
         compose = agentSandboxChecks.composeCheck;
-        docker-authorization = pkgs.runCommand "agent-sandbox-docker-authorization-check" { } ''
-          grep --fixed-strings 'sudo_arguments+=(--non-interactive)' \
-            ${startDockerDaemon}/bin/agent-docker-daemon >/dev/null
-          grep --fixed-strings 'sudo --non-interactive -v' ${../../.envrc} >/dev/null
+        docker-detachment = pkgs.runCommand "agent-sandbox-docker-detachment-check" { } ''
+          daemon=${startDockerDaemon}/bin/agent-docker-daemon
+          grep --fixed-strings 'for fd_path in /proc/$$/fd/*' "$daemon" >/dev/null
+          grep --fixed-strings 'exec sudo --non-interactive --background' "$daemon" >/dev/null
+          grep --fixed-strings 'sudo -v' "$daemon" >/dev/null
           touch "$out"
         '';
         exercise-image = agentSandboxChecks.exerciseImage;
