@@ -1,10 +1,14 @@
 # Agent sandbox
 
-Agent sandbox is a Nix-built container service for running coding-agent workloads as an unprivileged user. This bootstrap provides the Rust service package, OCI image, rootless Podman environment, Docker Compose compatibility, and an ephemeral `systemd-nspawn` runner.
+Agent sandbox is a container service that runs coding-agent workloads as an unprivileged user. It provides a Rust service, a versioned gRPC API, an OCI image, Docker and Podman support, and restic backups.
 
-The service exposes the versioned API in [`proto/v0`](proto/v0), gRPC reflection, and the standard gRPC health service on port 8080. Filesystem calls read and write small files under `/home/user`. Command calls start a fresh process and return its standard output, standard error, and exit code. The service rejects paths that escape `/home/user`, including symlink escapes.
+The service listens on port 8080. Filesystem calls read and write small files under `/home/user`. Command calls start a fresh process and return its standard output, standard error, and exit code. The service rejects paths that escape `/home/user`, including symbolic link escapes.
 
-## Set up
+## Getting started
+
+Choose the Nix or non-Nix path. The sections after this one apply to both paths.
+
+### Nix users
 
 Install Nix with flakes enabled. Enter the development environment:
 
@@ -12,11 +16,16 @@ Install Nix with flakes enabled. Enter the development environment:
 nix develop
 ```
 
-The shell provides two separate container runtimes. `podman` runs rootless without setup or authorization. The `docker` client connects to a worktree-local Docker daemon that the shell starts directly, not through a systemd unit. Starting this rootful daemon asks for wheel authorization. All active shells in one worktree share the daemon. The clean worktree directory name identifies its socket, process files, network bridge, and storage. Runtime files are under `/run/user/$UID`, and image storage is under `/var/tmp`. For example, `main` uses `agent-sandbox-docker-main`. This stable name helps users find stale resources.
+The shell provides two container runtimes:
 
-With nix-direnv installed, `direnv allow` activates the same environment when entering the repository. The daemon stops and removes its runtime resources after the last registered shell leaves the worktree or closes. A new activation reuses a healthy daemon and replaces a stale daemon before it exports `DOCKER_HOST` and `DOCKER_SOCK`. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` when only rootless Podman is needed.
+- `podman` runs rootless without setup or authorization.
+- `docker` connects to a worktree-local daemon. Starting this rootful daemon asks for wheel authorization.
 
-## Build and check
+All active shells in one worktree share the Docker daemon. Runtime files are under `/run/user/$UID`, and image storage is under `/var/tmp`. The daemon stops after the last registered shell exits or leaves the worktree. A new activation reuses a healthy daemon and replaces a stale daemon.
+
+With nix-direnv installed, `direnv allow` enters the same environment. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` before activation when you need only Podman or another Docker daemon.
+
+Build and check the project:
 
 ```console
 nix fmt
@@ -25,69 +34,115 @@ nix build .#agent-sandbox
 nix build .#agent-image
 ```
 
-Run the Docker-in-NixOS integration test explicitly:
-
-```console
-nix build .#nixos-vm-test -L
-```
-
-The VM test uses a two-node cluster. The `machine` node runs `docker.service` and the single Compose container. The separate `storage` node runs the SeaweedFS S3 service. The test replaces the container and checks that restic restores files, empty directories, links, modes, timestamps, and special entries. It also checks chunk reuse after a small file change. Host-side `grpcurl` calls test file access, path confinement, command failures, and all three acceptance scripts.
-
-The root flake follows the consumer-clean structure from `nix-project-template`: package and image definitions live under `nix/flake/`, while formatters, hooks, and shell tools are isolated in `dev/`.
-
-## Run containers
-
-Load the Nix-built OCI archive into either runtime:
+Load and run the Nix-built OCI archive with Podman:
 
 ```console
 podman load < "$(nix build --no-link --print-out-paths .#agent-image)"
 podman run --rm --publish 8080:8080 ghcr.io/johnrichardrinehart/agent-sandbox:latest
+```
 
-# Or use the shell's ephemeral Docker daemon.
+Use the development shell's Docker daemon instead:
+
+```console
 docker load < "$(nix build --no-link --print-out-paths .#agent-image)"
 docker run --rm --publish 8080:8080 ghcr.io/johnrichardrinehart/agent-sandbox:latest
 ```
 
-The compatibility Dockerfile and Compose definition run through rootless Podman:
-
-```console
-podman-compose up --build
-podman-compose down
-```
-
-Use the development Compose file to build the service and start a local MinIO store:
-
-```console
-docker compose -f ./docker-compose-dev.yaml up --build
-docker compose -f ./docker-compose-dev.yaml down
-```
-
-Compose waits for MinIO, creates the S3 bucket, and then starts the service. The MinIO volume keeps files after `down`. Use `down --volumes` to delete these files.
-
-The Nix and compatibility service images run as `sandbox-manager`, use `/home/user` as the home and working directory, preinstall the Python libraries declared in `pyproject.toml`, and start `agent-sandbox` as their entrypoint. The single-stage compatibility Dockerfile uses the pinned `nixos/nix:2.35.1` base and the locked flake to build the same Nix runtime package set as the OCI image; it does not use a Python base, apt, pip, or uv. `uv.lock` pins the separate Python project environment. The standard Compose file references `ghcr.io/johnrichardrinehart/agent-sandbox:latest`; `--build` replaces it locally with the compatibility Dockerfile build. The development Compose file tags its local build as `agent-sandbox:dev`.
-
-Exercise a running gRPC image with the packaged smoke test:
+Run the packaged smoke test after the service starts:
 
 ```console
 nix run .#exercise-image
 ```
 
-The source script provides the same zero-setup behavior:
+Run the service in an ephemeral `systemd-nspawn` container:
+
+```console
+nix run .#agent-systemd-nspawn
+```
+
+This command asks for wheel authorization. It uses an ephemeral overlay and runs the service as `sandbox-manager`. Inspect the generated command without elevation:
+
+```console
+nix run .#agent-systemd-nspawn -- --dry-run
+```
+
+The root flake follows the consumer-clean structure from `nix-project-template`. Package and image definitions are under `nix/flake/`. Formatters, hooks, and shell tools are isolated in `dev/`.
+
+### Users without Nix
+
+You do not need Nix on the host. Install Docker with the Compose plug-in. The compatibility Dockerfile uses a pinned `nixos/nix` base image and the locked flake inside the build.
+
+Start the service with a local MinIO store:
+
+```console
+docker compose -f ./docker-compose-dev.yaml up --build
+```
+
+Compose waits for MinIO, creates the S3 bucket, and starts the service. Stop the stack:
+
+```console
+docker compose -f ./docker-compose-dev.yaml down
+```
+
+The MinIO volume keeps backups after `down`. Delete the backups with:
+
+```console
+docker compose -f ./docker-compose-dev.yaml down --volumes
+```
+
+To use an existing restic repository, set its connection variables and use the standard Compose file:
+
+```console
+export RESTIC_REPOSITORY=s3:https://s3.example.com/agent-sandbox/home
+export RESTIC_PASSWORD='replace-this-value'
+export AWS_ACCESS_KEY_ID='replace-this-value'
+export AWS_SECRET_ACCESS_KEY='replace-this-value'
+docker compose up
+```
+
+The standard Compose file pulls `ghcr.io/johnrichardrinehart/agent-sandbox:latest`. Add `--build` to build the compatibility image locally. Podman users can run the same file with `podman-compose up --build` and stop it with `podman-compose down`.
+
+Install Bash and `grpcurl`, then run the source smoke test after the service starts:
+
+```console
+bash ./scripts/exercise-image.sh
+```
+
+## Common usage
+
+### Container behavior
+
+The Nix and compatibility images have the same runtime contract. They:
+
+- Run as `sandbox-manager`.
+- Use `/home/user` as the home and working directory.
+- Include the Python libraries declared in `pyproject.toml`.
+- Start `agent-sandbox` as the entrypoint.
+
+The compatibility Dockerfile does not use a Python base image, `apt`, `pip`, or `uv`. The separate `uv.lock` file pins the Python project environment. The development Compose file tags its local build as `agent-sandbox:dev`.
+
+The service listens on `0.0.0.0:8080` by default. Set `AGENT_SANDBOX_LISTEN` to use a different address.
+
+Each command gets a private process namespace and temporary file system. Only files in `/home/user` persist between calls. Command timeouts default to 30 seconds and have a five-minute maximum. A missing program returns a nonzero exit code. A timeout returns exit code 124.
+
+### Test a running service
+
+The source smoke test works with and without Nix:
 
 ```console
 ./scripts/exercise-image.sh
 ```
 
-The script uses a `nix-shell` shebang to provide Bash and `grpcurl` when executed on a Nix system. Without Nix, install Bash and `grpcurl`, then run `bash scripts/exercise-image.sh`; the `nix-shell` directives are ordinary shell comments in that mode. The script checks reflection and both health APIs, then writes and reads a fixture and runs a Python command through the control planes. Its optional settings are:
+On a Nix system, the `nix-shell` shebang provides Bash and `grpcurl`. Without Nix, run the script through an installed Bash as shown in the non-Nix instructions. The script checks reflection and the health APIs, writes and reads a fixture, and runs a Python command.
+
+These variables configure the smoke test:
 
 | Variable                | Default          | Purpose                                                                              |
 | ----------------------- | ---------------- | ------------------------------------------------------------------------------------ |
 | `AGENT_SANDBOX_ADDRESS` | `127.0.0.1:8080` | Select another gRPC host and port.                                                   |
 | `GRPCURL_FLAGS`         | `-plaintext`     | Supply whitespace-separated `grpcurl` transport options, such as `-cacert ./ca.pem`. |
 
-The service itself listens on `0.0.0.0:8080` by default. Set `AGENT_SANDBOX_LISTEN` when starting the binary or container to change its bind address. The development shell chooses a project-local Docker socket and exports `DOCKER_HOST` and `DOCKER_SOCK`; normal Docker commands need no socket options. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` before entering the shell when using only Podman or an independently managed runtime.
-
-## Call the service
+### Call the service
 
 Reflection lets `grpcurl` call the service without local descriptor files:
 
@@ -99,47 +154,51 @@ grpcurl -plaintext -d '{"argv":["python","-c","print(6 * 7)"]}' \
   127.0.0.1:8080 sandbox.v0.CommandService/ExecuteCommand
 ```
 
-Protocol Buffer `bytes` fields use base64 in JSON. `ExecuteCommand.argv` does not use a shell. Specify a shell in `argv` when you need shell syntax. The optional working directory is relative to `/home/user`. Each command gets a private process namespace and temporary file system. Only files in `/home/user` persist between calls. Command timeouts default to 30 seconds and have a five-minute maximum. A missing program returns a nonzero exit code. A timeout returns exit code 124.
+Protocol Buffer `bytes` fields use base64 in JSON. `ExecuteCommand.argv` does not use a shell. Add a shell to `argv` when you need shell syntax. The optional working directory is relative to `/home/user`.
 
-## Configure restic backups
+### Configure restic backups
 
-Restic persistence is mandatory. The container runs restic as `sandbox-manager`. Before it accepts requests, it initializes or opens the repository, writes and removes a sentinel snapshot, and restores the latest sandbox snapshot. The service exits if these operations fail. The Compose restart policy restarts the failed container. The service takes snapshots at set intervals and after a clean shutdown. Restic stores the directory tree directly and uploads only new content chunks and metadata.
+Restic persistence is mandatory. Before the service accepts requests, it:
+
+1. Initializes or opens the repository.
+2. Writes and removes a sentinel snapshot.
+3. Restores the latest sandbox snapshot.
+
+The service exits if an operation fails. The Compose restart policy restarts the failed container. The service takes snapshots at set intervals and after a clean shutdown. Restic uploads only new content chunks and metadata.
 
 These variables configure backups:
 
-- `RESTIC_REPOSITORY`: required repository URL, such as `s3:https://s3.example.com/agent-sandbox/home`. Compose defaults to `s3:http://host.docker.internal:9000/agent-sandbox/home`.
-- `RESTIC_PASSWORD`, `RESTIC_PASSWORD_FILE`, or `RESTIC_PASSWORD_COMMAND`: optional repository encryption secret. If none is set, the service uses the known value `agent-sandbox`.
-- `AGENT_SANDBOX_BACKUP_INTERVAL_SECONDS`: interval between snapshots. The default is 300 seconds.
-- `AGENT_SANDBOX_BACKUP_HOST`: stable restic host name. The default is `agent-sandbox`.
-- `RESTIC_CACHE_DIR`: optional cache path. The service uses `/tmp/restic-cache` by default so that it does not back up its cache.
-- Standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables configure S3 access.
+- `RESTIC_REPOSITORY`: Required repository URL, such as `s3:https://s3.example.com/agent-sandbox/home`. Standard Compose defaults to `s3:http://host.docker.internal:9000/agent-sandbox/home`.
+- `RESTIC_PASSWORD`, `RESTIC_PASSWORD_FILE`, or `RESTIC_PASSWORD_COMMAND`: Optional repository encryption secret. If none is set, the service uses the known value `agent-sandbox`.
+- `AGENT_SANDBOX_BACKUP_INTERVAL_SECONDS`: Interval between snapshots. The default is 300 seconds.
+- `AGENT_SANDBOX_BACKUP_HOST`: Stable restic host name. The default is `agent-sandbox`.
+- `RESTIC_CACHE_DIR`: Optional cache path. The service uses `/tmp/restic-cache` by default so that it does not back up its cache.
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION`: S3 access settings.
 
-Restic preserves regular files, empty directories, symbolic and hard links, permission bits, access and modification times, and supported special entries. It also records supported extended attributes. The unprivileged process cannot restore metadata that requires extra privileges. Linux does not let a process set inode change time, so each restored inode has a new `ctime`. See [CAVEATS.md](CAVEATS.md) for the filesystem and repository limits.
+Restic preserves regular files, empty directories, symbolic and hard links, permission bits, access and modification times, and supported special entries. It also records supported extended attributes. The unprivileged process cannot restore metadata that needs more privileges. Linux does not let a process set inode change time, so each restored inode has a new `ctime`.
 
-Compose passes these variables into its single container. A plain-HTTP S3-compatible service can be selected with a repository URL that starts with `s3:http://`. Compose uses [`seccomp.json`](seccomp.json), which is based on the Moby default profile at commit `f9bc03ec19b2dc4c091449b08e88f85c0caa9f0b`. The profile adds only the namespace, mount, and root-switch system calls that Bubblewrap needs. Compose also drops all container capabilities. See [CAVEATS.md](CAVEATS.md) for the remaining kernel risk.
+A plain-HTTP S3-compatible service uses a repository URL that starts with `s3:http://`. Compose passes the backup variables to the container.
 
-## Continuous integration
+Compose uses [`seccomp.json`](seccomp.json), which is based on the Moby default profile at commit `f9bc03ec19b2dc4c091449b08e88f85c0caa9f0b`. The profile adds only the namespace, mount, and root-switch system calls that Bubblewrap needs. Compose also drops all container capabilities. See [CAVEATS.md](CAVEATS.md) for filesystem, repository, and kernel limits.
 
-GitHub Actions remains a check-only adapter. SourceHut runs the same `nix flake check --print-build-logs` contract from [`.build.yml`](.build.yml), builds the Nix OCI archive, and publishes only `refs/heads/main` to GHCR. Other SourceHut branches build and test the image but cannot publish it. The NixOS VM test is a package, not a flake check, so CI does not build or run it.
+## Project checks and continuous integration
 
-The SourceHut repository is the registered private mirror at `git.sr.ht/~fuzzybear3965/agent-sandbox`. A push containing `.build.yml` submits a build automatically. The manifest uses the existing SourceHut CI SSH-key secret to clone this private repository.
+Run the Docker-in-NixOS integration test explicitly:
+
+```console
+nix build .#nixos-vm-test -L
+```
+
+The test uses two nodes. The `machine` node runs Docker and the Compose container. The `storage` node runs the SeaweedFS S3 service. The test replaces the container and checks that restic restores files, empty directories, links, modes, timestamps, and special entries. It also checks chunk reuse after a small file change. Host-side `grpcurl` calls test file access, path confinement, command failures, and all three acceptance scripts.
+
+GitHub Actions is a check-only adapter. SourceHut runs `nix flake check --print-build-logs`, builds the Nix OCI archive, and publishes only `refs/heads/main` to GHCR. Other SourceHut branches build and test the image but cannot publish it. CI does not run the NixOS VM test.
+
+The SourceHut repository is the registered private mirror at `git.sr.ht/~fuzzybear3965/agent-sandbox`. A push that contains `.build.yml` submits a build automatically. The manifest uses the existing SourceHut CI SSH-key secret to clone this private repository.
 
 ### GHCR secret
 
-Create a GitHub personal access token (classic) for `johnrichardrinehart` at <https://github.com/settings/tokens/new?scopes=write:packages>. This URL avoids the GitHub token form's default addition of the broad `repo` scope. Keep only `write:packages`, which includes image download and upload; do not add `repo`, `workflow`, or `delete:packages`.
+Create a GitHub personal access token (classic) for `johnrichardrinehart` at <https://github.com/settings/tokens/new?scopes=write:packages>. Keep only `write:packages`. Do not add `repo`, `workflow`, or `delete:packages`.
 
-The SourceHut file secret declared in `.build.yml` is mounted at `~/.ghcr_pat`; its complete contents are the token. SourceHut runs tasks with shell tracing enabled, so the publishing app reads the file with tracing disabled and passes the token to `skopeo login` through standard input.
+The SourceHut file secret in `.build.yml` is mounted at `~/.ghcr_pat`. Its complete contents are the token. SourceHut runs tasks with shell tracing enabled, so the publishing app reads the file with tracing disabled and passes the token to `skopeo login` through standard input.
 
-A main build publishes `ghcr.io/johnrichardrinehart/agent-sandbox:latest` and `0.0.n`, where `n` is the main commit count, then confirms that both tags have the same digest. GHCR makes a new personal package private by default. After its first publication, change the package visibility to public in its GitHub package settings so the documented Compose command can pull it without authentication.
-
-## Run with systemd-nspawn
-
-```console
-nix run .#agent-systemd-nspawn
-```
-
-This command asks for wheel authorization and launches the Nix root filesystem through `systemd-nspawn` with an ephemeral overlay. It runs the service as `sandbox-manager`; changes vanish when the unit exits. Inspect the generated command without elevation with:
-
-```console
-nix run .#agent-systemd-nspawn -- --dry-run
-```
+A main build publishes `ghcr.io/johnrichardrinehart/agent-sandbox:latest` and `0.0.n`, where `n` is the main commit count. It then confirms that both tags have the same digest. GHCR makes a new personal package private by default. After the first publication, make the package public in its GitHub package settings.
