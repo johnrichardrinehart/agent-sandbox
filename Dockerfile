@@ -3,13 +3,14 @@ FROM nixos/nix:2.35.1
 ENV NIX_CONFIG="experimental-features = nix-command flakes"
 WORKDIR /build
 COPY . .
-RUN mkdir -p /opt /home/user \
+RUN mkdir -p /opt /home/user /tmp \
     && nix build --out-link /opt/agent-runtime .#agent-runtime \
     && printf '%s\n' \
       'sandbox-manager:x:10001:10001:Sandbox manager:/home/user:/bin/sh' \
       >>/etc/passwd \
     && printf '%s\n' 'sandbox-manager:x:10001:' >>/etc/group \
     && chown 10001:10001 /home/user \
+    && chmod 1777 /tmp \
     && find /build -mindepth 1 -delete \
     && nix store gc
 

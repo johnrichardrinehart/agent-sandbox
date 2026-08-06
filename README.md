@@ -31,7 +31,7 @@ Run the Docker-in-NixOS integration test explicitly:
 nix build .#nixos-vm-test -L
 ```
 
-The VM test uses a two-node cluster. The `machine` node runs `docker.service` and the single Compose container. The separate `storage` node runs the SeaweedFS S3 service. The test sets `AGENT_SANDBOX_S3_ENDPOINT` to the storage node address, verifies startup and shutdown synchronization, and uses host-side `grpcurl` calls to test file access, path confinement, command failures, and all three acceptance scripts.
+The VM test uses a two-node cluster. The `machine` node runs `docker.service` and the single Compose container. The separate `storage` node runs the SeaweedFS S3 service. The test replaces the container and checks that restic restores files, empty directories, links, modes, timestamps, and special entries. It also checks chunk reuse after a small file change. Host-side `grpcurl` calls test file access, path confinement, command failures, and all three acceptance scripts.
 
 The root flake follows the consumer-clean structure from `nix-project-template`: package and image definitions live under `nix/flake/`, while formatters, hooks, and shell tools are isolated in `dev/`.
 
@@ -92,18 +92,22 @@ grpcurl -plaintext -d '{"argv":["python","-c","print(6 * 7)"]}' \
 
 Protocol Buffer `bytes` fields use base64 in JSON. `ExecuteCommand.argv` does not use a shell. Specify a shell in `argv` when you need shell syntax. The optional working directory is relative to `/home/user`. Each command gets a private process namespace and temporary file system. Only files in `/home/user` persist between calls. Command timeouts default to 30 seconds and have a five-minute maximum. A missing program returns a nonzero exit code. A timeout returns exit code 124.
 
-## Configure S3 synchronization
+## Configure restic backups
 
-S3 persistence is mandatory. Before it accepts requests, the service writes and removes a sentinel object. It then downloads the configured prefix. The service exits if it cannot write the sentinel or complete the download. The Compose restart policy restarts the failed container. On `SIGTERM` or `SIGINT`, the service uploads `/home/user`.
+Restic persistence is mandatory. The container runs restic as `sandbox-manager`. Before it accepts requests, it initializes or opens the repository, writes and removes a sentinel snapshot, and restores the latest sandbox snapshot. The service exits if these operations fail. The Compose restart policy restarts the failed container. The service takes snapshots at set intervals and after a clean shutdown. Restic stores the directory tree directly and uploads only new content chunks and metadata.
 
-These variables configure the store:
+These variables configure backups:
 
-- `AGENT_SANDBOX_S3_BUCKET`: required bucket name. Compose defaults to `agent-sandbox`.
-- `AGENT_SANDBOX_S3_PREFIX`: object prefix, defaulting to `home`.
-- `AGENT_SANDBOX_S3_ENDPOINT`: optional S3-compatible endpoint for services such as MinIO.
-- Standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables provide credentials and region. Set `AWS_ALLOW_HTTP=true` for a plain-HTTP local endpoint or `AWS_SKIP_SIGNATURE=true` for an anonymous test service.
+- `RESTIC_REPOSITORY`: required repository URL, such as `s3:https://s3.example.com/agent-sandbox/home`. Compose defaults to `s3:http://host.docker.internal:9000/agent-sandbox/home`.
+- `RESTIC_PASSWORD`, `RESTIC_PASSWORD_FILE`, or `RESTIC_PASSWORD_COMMAND`: optional repository encryption secret. If none is set, the service uses the known value `agent-sandbox`.
+- `AGENT_SANDBOX_BACKUP_INTERVAL_SECONDS`: interval between snapshots. The default is 300 seconds.
+- `AGENT_SANDBOX_BACKUP_HOST`: stable restic host name. The default is `agent-sandbox`.
+- `RESTIC_CACHE_DIR`: optional cache path. The service uses `/tmp/restic-cache` by default so that it does not back up its cache.
+- Standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` variables configure S3 access.
 
-Compose passes these variables into its single container and maps `host.docker.internal` to the host gateway. You can use an S3-compatible service on the host without another Compose service. Compose uses [`seccomp.json`](seccomp.json), which is based on the Moby default profile at commit `f9bc03ec19b2dc4c091449b08e88f85c0caa9f0b`. The profile adds only the namespace, mount, and root-switch system calls that Bubblewrap needs. Compose also drops all container capabilities. See [CAVEATS.md](CAVEATS.md) for the remaining kernel risk.
+Restic preserves regular files, empty directories, symbolic and hard links, permission bits, access and modification times, and supported special entries. It also records supported extended attributes. The unprivileged process cannot restore metadata that requires extra privileges. Linux does not let a process set inode change time, so each restored inode has a new `ctime`. See [CAVEATS.md](CAVEATS.md) for the filesystem and repository limits.
+
+Compose passes these variables into its single container. A plain-HTTP S3-compatible service can be selected with a repository URL that starts with `s3:http://`. Compose uses [`seccomp.json`](seccomp.json), which is based on the Moby default profile at commit `f9bc03ec19b2dc4c091449b08e88f85c0caa9f0b`. The profile adds only the namespace, mount, and root-switch system calls that Bubblewrap needs. Compose also drops all container capabilities. See [CAVEATS.md](CAVEATS.md) for the remaining kernel risk.
 
 ## Continuous integration
 

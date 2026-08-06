@@ -7,7 +7,8 @@ use sandbox::v0::{
     filesystem_service_server::FilesystemServiceServer, health_service_server::HealthServiceServer,
 };
 use service::SandboxService;
-use storage::S3Sync;
+use storage::ResticBackup;
+use tokio::sync::watch;
 use tonic::transport::Server;
 use tracing::{error, info};
 
@@ -33,9 +34,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .parse()?;
     let root =
         PathBuf::from(env::var("AGENT_SANDBOX_HOME").unwrap_or_else(|_| "/home/user".into()));
-    let storage = S3Sync::from_env()?;
-    storage.verify_write().await?;
-    storage.sync_down(&root).await?;
+    let backup = ResticBackup::from_env()?;
+    backup.restore(&root).await?;
 
     let service = SandboxService::new(&root)?;
     let filesystem = FilesystemServiceServer::new(service.clone());
@@ -57,6 +57,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
+    let (stop_sender, stop_receiver) = watch::channel(false);
+    let periodic_backup = {
+        let backup = backup.clone();
+        let root = root.clone();
+        tokio::spawn(async move { backup.run_periodic(&root, stop_receiver).await })
+    };
+
     info!(%address, root = %root.display(), "agent-sandbox gRPC service listening");
     Server::builder()
         .add_service(health)
@@ -64,13 +71,21 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         .add_service(versioned_health)
         .add_service(filesystem)
         .add_service(command)
-        .serve_with_shutdown(address, shutdown_signal(storage, root))
+        .serve_with_shutdown(address, shutdown_signal())
         .await?;
+
+    stop_sender.send_replace(true);
+    if let Err(error) = periodic_backup.await {
+        error!(%error, "periodic restic backup task failed");
+    }
+    if let Err(error) = backup.backup(&root).await {
+        error!(%error, "final restic backup failed");
+    }
 
     Ok(())
 }
 
-async fn shutdown_signal(storage: S3Sync, root: PathBuf) {
+async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let mut terminate =
@@ -91,7 +106,4 @@ async fn shutdown_signal(storage: S3Sync, root: PathBuf) {
     }
 
     info!("shutdown requested");
-    if let Err(error) = storage.sync_up(&root).await {
-        error!(%error, "failed to synchronize sandbox to S3 during shutdown");
-    }
 }

@@ -53,6 +53,7 @@ _: {
         agent
         pkgs.bubblewrap
         pkgs.cacert
+        pkgs.restic
         tesseract
         python
       ];
@@ -264,11 +265,19 @@ _: {
                 serviceConfig = {
                   DynamicUser = true;
                   StateDirectory = "seaweedfs";
+                  Environment = [
+                    "AWS_ACCESS_KEY_ID=sandbox"
+                    "AWS_SECRET_ACCESS_KEY=sandbox-secret"
+                  ];
                   ExecStart = "${pkgs.seaweedfs}/bin/weed server -dir=/var/lib/seaweedfs -ip=127.0.0.1 -ip.bind=0.0.0.0 -master.port=19333 -volume.port=18080 -filer -filer.port=18888 -s3 -s3.port=9000";
                 };
               };
               networking.firewall.allowedTCPPorts = [ 9000 ];
-              environment.systemPackages = [ pkgs.curl ];
+              environment.systemPackages = [
+                pkgs.curl
+                pkgs.jq
+                pkgs.restic
+              ];
             };
         };
 
@@ -277,25 +286,13 @@ _: {
           machine.wait_for_unit("docker.service")
           storage.wait_for_unit("seaweedfs.service")
           storage.wait_until_succeeds(
-              "curl --fail --silent http://127.0.0.1:9000 >/dev/null"
-          )
-          storage.succeed(
-              "curl --fail --silent --request PUT "
-              "http://127.0.0.1:9000/agent-sandbox"
-          )
-          storage.succeed("printf startup-sync >/tmp/from-s3.txt")
-          storage.succeed(
-              "curl --fail --silent --request PUT "
-              "--data-binary @/tmp/from-s3.txt "
-              "http://127.0.0.1:9000/agent-sandbox/home/from-s3.txt"
+              "curl --silent --output /dev/null http://127.0.0.1:9000"
           )
           machine.succeed("docker load < ${agentImage}")
           machine.fail(
               "docker run --rm --network none "
-              "--env AGENT_SANDBOX_S3_BUCKET=missing "
-              "--env AGENT_SANDBOX_S3_ENDPOINT=http://127.0.0.1:1 "
+              "--env RESTIC_REPOSITORY=s3:http://127.0.0.1:1/missing "
               "--env AWS_DEFAULT_REGION=us-east-1 "
-              "--env AWS_SKIP_SIGNATURE=true "
               "ghcr.io/johnrichardrinehart/agent-sandbox:latest"
           )
 
@@ -303,12 +300,19 @@ _: {
               "ip -4 -o address show dev eth1 | awk '{print $4}' | cut -d/ -f1"
           ).strip()
           compose_env = (
-              "AGENT_SANDBOX_S3_BUCKET=agent-sandbox "
+              "AGENT_SANDBOX_BACKUP_INTERVAL_SECONDS=3600 "
               "AGENT_SANDBOX_SECCOMP_PROFILE=${../../seccomp.json} "
-              f"AGENT_SANDBOX_S3_ENDPOINT=http://{storage_ip}:9000 "
-              "AGENT_SANDBOX_S3_PREFIX=home "
-              "AWS_DEFAULT_REGION=us-east-1 AWS_ALLOW_HTTP=true "
-              "AWS_SKIP_SIGNATURE=true "
+              f"RESTIC_REPOSITORY=s3:http://{storage_ip}:9000/agent-sandbox/home "
+              "AWS_ACCESS_KEY_ID=sandbox "
+              "AWS_SECRET_ACCESS_KEY=sandbox-secret "
+              "AWS_DEFAULT_REGION=us-east-1 "
+          )
+          storage_env = (
+              "RESTIC_REPOSITORY=s3:http://127.0.0.1:9000/agent-sandbox/home "
+              "RESTIC_PASSWORD=agent-sandbox "
+              "AWS_ACCESS_KEY_ID=sandbox "
+              "AWS_SECRET_ACCESS_KEY=sandbox-secret "
+              "AWS_DEFAULT_REGION=us-east-1 "
           )
           compose = (
               compose_env
@@ -363,11 +367,16 @@ _: {
                   f"jq -r .{stream} /tmp/command.json | base64 -d | grep -F '{expected}'"
               )
 
-          machine.succeed(
-              "grpcurl -plaintext -d '{\"path\":\"from-s3.txt\"}' "
-              "127.0.0.1:8080 sandbox.v0.FilesystemService/ReadFile "
-              "| jq -r .content | base64 -d | grep -Fx startup-sync"
-          )
+          def execute_python(code, expected):
+              machine.succeed(
+                  f"request=$(jq -nc --arg code \"{code}\" "
+                  "'{argv:[\"python\",\"-c\",$code],timeoutMs:\"120000\"}'); "
+                  "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
+                  "sandbox.v0.CommandService/ExecuteCommand >/tmp/python.json; "
+                  "test \"$(jq -r '.exitCode // 0' /tmp/python.json)\" -eq 0; "
+                  f"jq -r .stdout /tmp/python.json | base64 -d | grep -Fx '{expected}'"
+              )
+
           machine.fail(
               "grpcurl -plaintext -d "
               "'{\"path\":\"../escape.txt\",\"content\":\"\"}' "
@@ -453,17 +462,80 @@ _: {
               "grpcurl -plaintext -d \"$request\" 127.0.0.1:8080 "
               "sandbox.v0.FilesystemService/WriteFile >/dev/null"
           )
-          machine.succeed(compose + "down")
-          storage.wait_until_succeeds(
-              "test \"$(curl --fail --silent "
-              "http://127.0.0.1:9000/agent-sandbox/home/persisted.txt)\" "
-              "= persisted"
+          execute_python(
+              "import os; from pathlib import Path; "
+              "root=Path('/home/user'); os.chmod(root,0o750); "
+              "empty=root/'empty'; empty.mkdir(); os.chmod(empty,0o711); "
+              "os.utime(empty,ns=(946684800000000000,946684800000000000)); "
+              "large=root/'large.bin'; large.write_bytes(os.urandom(16*1024*1024)); "
+              "executable=root/'executable'; executable.write_text('#!/bin/sh\\n'); "
+              "os.chmod(executable,0o751); saved=root/'persisted.txt'; os.chmod(saved,0o640); "
+              "os.utime(saved,ns=(946684800000000000,946684800000000000)); "
+              "os.link(saved,root/'hard-link'); os.symlink('persisted.txt',root/'symbolic-link'); "
+              "os.utime(root/'symbolic-link',ns=(946684800000000000,946684800000000000),follow_symlinks=False); "
+              "os.mkfifo(root/'named-pipe',0o600); "
+              "fd=os.open(os.fsencode(root)+b'/non-utf8-\\xff',os.O_WRONLY|os.O_CREAT,0o600); "
+              "os.write(fd,b'bytes-name'); os.close(fd); "
+              "(root/'ctime-before.txt').write_text(str(os.stat(saved).st_ctime_ns)); "
+              "print('metadata-created')",
+              "metadata-created",
           )
+          machine.succeed(compose + "down")
+          first_snapshot = storage.succeed(
+              storage_env + "restic snapshots --json | jq -r '.[-1].id'"
+          ).strip()
+          first_size = int(storage.succeed(
+              storage_env
+              + f"restic stats --json --mode raw-data {first_snapshot} | jq -r .total_size"
+          ))
           machine.succeed(compose + "up --detach --no-build")
           machine.wait_until_succeeds(
+              "grpcurl -plaintext 127.0.0.1:8080 list "
+              "sandbox.v0.FilesystemService | grep WriteFile"
+          )
+          execute_python(
+              "import os,stat; from pathlib import Path; root=Path('/home/user'); "
+              "saved=root/'persisted.txt'; info=os.stat(saved); empty=root/'empty'; "
+              "empty_info=os.stat(empty); link_info=os.lstat(root/'symbolic-link'); "
+              "assert stat.S_IMODE(os.stat(root).st_mode)==0o750; "
+              "assert empty.is_dir() and not any(empty.iterdir()); "
+              "assert stat.S_IMODE(empty_info.st_mode)==0o711; "
+              "assert empty_info.st_atime_ns==946684800000000000; "
+              "assert empty_info.st_mtime_ns==946684800000000000; "
+              "assert (root/'symbolic-link').is_symlink(); "
+              "assert os.readlink(root/'symbolic-link')=='persisted.txt'; "
+              "assert link_info.st_atime_ns==946684800000000000; "
+              "assert link_info.st_mtime_ns==946684800000000000; "
+              "assert os.stat(root/'hard-link').st_ino==info.st_ino; "
+              "assert stat.S_IMODE(info.st_mode)==0o640; "
+              "assert stat.S_IMODE(os.stat(root/'executable').st_mode)==0o751; "
+              "assert info.st_uid==os.getuid() and info.st_gid==os.getgid(); "
+              "assert info.st_atime_ns==946684800000000000; "
+              "assert info.st_mtime_ns==946684800000000000; "
+              "assert info.st_ctime_ns>int((root/'ctime-before.txt').read_text()); "
+              "assert stat.S_ISFIFO(os.stat(root/'named-pipe').st_mode); "
+              "assert stat.S_IMODE(os.stat(root/'named-pipe').st_mode)==0o600; "
+              "assert os.path.exists(os.fsencode(root)+b'/non-utf8-\\xff'); "
+              "large=root/'large.bin'; data=bytearray(large.read_bytes()); "
+              "data[len(data)//2]^=1; large.write_bytes(data); print('metadata-ok')",
+              "metadata-ok",
+          )
+          machine.succeed(
               "grpcurl -plaintext -d '{\"path\":\"persisted.txt\"}' "
               "127.0.0.1:8080 sandbox.v0.FilesystemService/ReadFile "
               "| jq -r .content | base64 -d | grep -Fx persisted"
+          )
+          machine.succeed(compose + "down")
+          second_snapshot = storage.succeed(
+              storage_env + "restic snapshots --json | jq -r '.[-1].id'"
+          ).strip()
+          combined_size = int(storage.succeed(
+              storage_env
+              + f"restic stats --json --mode raw-data {first_snapshot} {second_snapshot} "
+              "| jq -r .total_size"
+          ))
+          assert combined_size < first_size * 3 // 2, (
+              f"restic delta was too large: first={first_size}, combined={combined_size}"
           )
         '';
       };
