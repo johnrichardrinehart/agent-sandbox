@@ -44,6 +44,7 @@ services:
   agent:
     build:
       context: .
+      network: host
     image: agent-sandbox:dev
     depends_on:
       s3-init:
