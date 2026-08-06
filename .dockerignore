@@ -1,0 +1,6 @@
+.git
+.direnv
+.pre-commit-config.yaml
+result
+result-*
+target

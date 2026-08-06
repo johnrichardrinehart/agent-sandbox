@@ -39,6 +39,18 @@ _: {
         pythonPackages.requests
       ]);
 
+      agentRuntimePackages = [
+        agent
+        pkgs.cacert
+        pkgs.tesseract
+        python
+      ];
+
+      agentRuntime = pkgs.buildEnv {
+        name = "agent-sandbox-runtime";
+        paths = agentRuntimePackages;
+      };
+
       agentRootfs = pkgs.runCommand "agent-sandbox-rootfs" { } ''
         mkdir -p "$out/etc" "$out/home/user" "$out/usr/bin"
         cat > "$out/etc/passwd" <<'EOF'
@@ -55,12 +67,7 @@ _: {
       agentImage = pkgs.dockerTools.buildLayeredImage {
         name = "ghcr.io/johnrichardrinehart/agent-sandbox";
         tag = "latest";
-        contents = [
-          agent
-          pkgs.cacert
-          pkgs.tesseract
-          python
-        ];
+        contents = agentRuntimePackages;
         fakeRootCommands = ''
           mkdir -p ./etc ./home/user
           cat > ./etc/passwd <<'EOF'
@@ -201,6 +208,7 @@ _: {
         agent-image = agentImage;
         oci-image = agentImage;
         agent-rootfs = agentRootfs;
+        agent-runtime = agentRuntime;
         agent-systemd-nspawn = nspawnApp;
         publish-image = publishImage;
       };

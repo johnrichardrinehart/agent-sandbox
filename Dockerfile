@@ -1,33 +1,24 @@
-FROM rust:1.88-bookworm AS builder
+FROM nixos/nix:2.35.1
+
+ENV NIX_CONFIG="experimental-features = nix-command flakes"
 WORKDIR /build
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo build --locked --release
+COPY . .
+RUN mkdir -p /opt /home/user \
+    && nix build --out-link /opt/agent-runtime .#agent-runtime \
+    && printf '%s\n' \
+      'sandbox-manager:x:10001:10001:Sandbox manager:/home/user:/bin/sh' \
+      >>/etc/passwd \
+    && printf '%s\n' 'sandbox-manager:x:10001:' >>/etc/group \
+    && chown 10001:10001 /home/user \
+    && find /build -mindepth 1 -delete \
+    && nix store gc
 
-FROM ghcr.io/astral-sh/uv:0.11.21 AS uv
-
-FROM python:3.13-slim-bookworm
-RUN apt-get update \
-    && apt-get install --no-install-recommends --yes tesseract-ocr \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=uv /uv /usr/local/bin/uv
-COPY pyproject.toml uv.lock /tmp/python-project/
-RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync \
-      --project /tmp/python-project \
-      --locked \
-      --no-cache \
-      --no-dev \
-      --no-install-project \
-    && rm -rf /tmp/python-project
-ENV PATH="/opt/venv/bin:${PATH}"
-RUN groupadd --gid 10001 --system sandbox-manager \
-    && useradd --uid 10001 --gid sandbox-manager --system \
-      --home-dir /home/user --create-home sandbox-manager
-COPY --from=builder /build/target/release/agent-sandbox /usr/local/bin/agent-sandbox
 USER sandbox-manager
 ENV HOME=/home/user
+ENV PATH=/opt/agent-runtime/bin:/nix/var/nix/profiles/default/bin
+ENV SSL_CERT_FILE=/opt/agent-runtime/etc/ssl/certs/ca-bundle.crt
 WORKDIR /home/user
 EXPOSE 8080
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
-ENTRYPOINT ["/usr/local/bin/agent-sandbox"]
+ENTRYPOINT ["/opt/agent-runtime/bin/agent-sandbox"]
