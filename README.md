@@ -12,9 +12,9 @@ Install Nix with flakes enabled. Enter the development environment:
 nix develop
 ```
 
-The shell provides two separate container runtimes. `podman` runs rootless without setup or authorization. The `docker` client connects to a project-local Docker daemon started directly by the shell, not by a systemd unit. Starting that rootful daemon asks for wheel authorization. Its socket, process files, and storage live under `/run/user/$UID/agent-sandbox-docker-$PID` and are removed when the development shell exits.
+The shell provides two separate container runtimes. `podman` runs rootless without setup or authorization. The `docker` client connects to a worktree-local Docker daemon started directly by the shell, not by a systemd unit. Starting that rootful daemon asks for wheel authorization. The sanitized worktree directory name identifies its socket, process files, network bridge, and storage under `/run/user/$UID`; for example, `main` uses `agent-sandbox-docker-main`. Stable, readable names let users find stale resources and let the next activation reap state left by an interrupted shell.
 
-With nix-direnv installed, `direnv allow` activates the same environment when entering the repository. Each interactive shell gets its own Docker daemon; leaving the repository or closing that shell stops it. The shell exports `DOCKER_HOST` and `DOCKER_SOCK` for its Docker socket. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` when only rootless Podman is needed.
+With nix-direnv installed, `direnv allow` activates the same environment when entering the repository. Leaving the worktree or closing its shell stops the Docker daemon and removes its runtime resources. A new activation for the same worktree replaces any stale daemon before exporting `DOCKER_HOST` and `DOCKER_SOCK`. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` when only rootless Podman is needed.
 
 ## Build and check
 
