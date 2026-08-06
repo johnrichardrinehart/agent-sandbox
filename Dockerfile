@@ -4,13 +4,22 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --locked --release
 
+FROM ghcr.io/astral-sh/uv:0.11.21 AS uv
+
 FROM python:3.13-slim-bookworm
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --requirement /tmp/requirements.txt \
-    && rm /tmp/requirements.txt
+COPY --from=uv /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock /tmp/python-project/
+RUN UV_PROJECT_ENVIRONMENT=/opt/venv uv sync \
+      --project /tmp/python-project \
+      --locked \
+      --no-cache \
+      --no-dev \
+      --no-install-project \
+    && rm -rf /tmp/python-project
+ENV PATH="/opt/venv/bin:${PATH}"
 RUN groupadd --gid 10001 --system sandbox-manager \
     && useradd --uid 10001 --gid sandbox-manager --system \
       --home-dir /home/user --create-home sandbox-manager

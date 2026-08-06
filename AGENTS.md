@@ -1,5 +1,9 @@
 # Project agent instructions
 
+## Immutable files
+
+- Do not modify `INSTRUCTIONS.md`. Preserve its exact contents and hash across every revision.
+
 ## CI monitoring
 
 - Limit each wait for a queued CI run to 30 seconds unless the run starts or otherwise makes progress.

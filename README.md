@@ -43,7 +43,7 @@ podman-compose up --build
 podman-compose down
 ```
 
-Both images run as `sandbox-manager`, use `/home/user` as the home and working directory, preinstall every library listed in `requirements.txt`, and start `agent-sandbox` as their entrypoint. Compose references `ghcr.io/johnrichardrinehart/agent-sandbox:latest`; `--build` replaces it locally with the compatibility Dockerfile build.
+Both images run as `sandbox-manager`, use `/home/user` as the home and working directory, preinstall the Python libraries declared in `pyproject.toml`, and start `agent-sandbox` as their entrypoint. `uv.lock` pins the compatibility Dockerfile's complete Python environment. Compose references `ghcr.io/johnrichardrinehart/agent-sandbox:latest`; `--build` replaces it locally with the compatibility Dockerfile build.
 
 ## Continuous integration
 
