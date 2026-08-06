@@ -31,6 +31,7 @@
           runtime_dir="/run/user/$uid"
           daemon_dir="$runtime_dir/agent-sandbox-docker-$project_id"
           data_dir="/var/tmp/agent-sandbox-docker-$uid-$project_id"
+          owners_dir="$daemon_dir/owners"
           pidfile="$daemon_dir/dockerd.pid"
           bridge="asd-''${project_id:0:11}"
           network_id=$(printf '%s' "$project_root" | cksum | cut -d ' ' -f1)
@@ -58,6 +59,23 @@
                   ;;
               esac
             done < <(findmnt --raw --noheadings --output TARGET | sort --reverse)
+          }
+
+          register_owner() {
+            printf '%s\n' "$2" >"$owners_dir/$1"
+          }
+
+          owner_is_active() {
+            local tracked_pid=$1
+            local tracked_watch_cwd=$2
+            local tracked_cwd
+
+            [[ "$tracked_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+            [[ "$tracked_watch_cwd" == 0 || "$tracked_watch_cwd" == 1 ]] || return 1
+            kill -0 "$tracked_pid" 2>/dev/null || return 1
+            [[ "$tracked_watch_cwd" == 0 ]] && return 0
+            tracked_cwd=$(readlink -f "/proc/$tracked_pid/cwd" 2>/dev/null || true)
+            [[ "$tracked_cwd" == "$project_root" || "$tracked_cwd" == "$project_root/"* ]]
           }
 
           cleanup() {
@@ -103,8 +121,10 @@
           unmount_tree "$data_dir"
           rm -rf "$daemon_dir" "$data_dir"
           install -d -m 0750 -o root -g "$gid" "$daemon_dir" "$data_dir"
+          install -d -m 0770 -o root -g "$gid" "$owners_dir"
+          install -m 0660 -o root -g "$gid" /dev/null "$owners_dir/$owner_pid"
+          register_owner "$owner_pid" "$watch_cwd"
           printf '%s\n' "$$" >"$daemon_dir/runner.pid"
-          printf '%s\n' "$owner_pid" >"$daemon_dir/owner.pid"
 
           ip link add name "$bridge" type bridge
           ip address add "$bridge_address" dev "$bridge"
@@ -120,11 +140,19 @@
             --pidfile "$pidfile" &
           daemon_pid=$!
 
-          while kill -0 "$owner_pid" 2>/dev/null && kill -0 "$daemon_pid" 2>/dev/null; do
-            if [[ "$watch_cwd" == 1 ]]; then
-              owner_cwd=$(readlink -f "/proc/$owner_pid/cwd" 2>/dev/null || true)
-              [[ "$owner_cwd" == "$project_root" || "$owner_cwd" == "$project_root/"* ]] || break
-            fi
+          while kill -0 "$daemon_pid" 2>/dev/null; do
+            active_owners=0
+            for owner_file in "$owners_dir"/*; do
+              [[ -f "$owner_file" ]] || continue
+              tracked_pid="''${owner_file##*/}"
+              tracked_watch_cwd=$(<"$owner_file")
+              if owner_is_active "$tracked_pid" "$tracked_watch_cwd"; then
+                active_owners=$((active_owners + 1))
+              else
+                rm -f "$owner_file"
+              fi
+            done
+            [[ "$active_owners" -gt 0 ]] || break
             sleep 1
           done
         '';
@@ -145,6 +173,7 @@
           [[ "$project_id" != . && "$project_id" != .. ]] || project_id=worktree
           uid=$(id -u)
           daemon_dir="/run/user/$uid/agent-sandbox-docker-$project_id"
+          owners_dir="$daemon_dir/owners"
           socket="$daemon_dir/docker.sock"
           log="/run/user/$uid/agent-sandbox-dockerd-$project_id.log"
           docker_host="unix://$socket"
@@ -162,10 +191,14 @@
             exit 1
           }
 
+          register_owner() {
+            printf '%s\n' "$2" >"$owners_dir/$1"
+          }
+
           if [[ -S "$socket" \
-            && -f "$daemon_dir/owner.pid" \
-            && "$(<"$daemon_dir/owner.pid")" == "$owner_pid" ]] \
+            && -d "$owners_dir" ]] \
             && docker --host "$docker_host" info >/dev/null 2>&1; then
+            register_owner "$owner_pid" "$watch_cwd"
             exit 0
           fi
 
@@ -269,6 +302,13 @@
           grep --fixed-strings 'exec sudo --non-interactive --background' "$daemon" >/dev/null
           grep --fixed-strings 'sudo -v' "$daemon" >/dev/null
           grep --fixed-strings 'data_dir="/var/tmp/agent-sandbox-docker-$uid-$project_id"' "$runner" >/dev/null
+          grep --fixed-strings 'owners_dir="$daemon_dir/owners"' "$runner" >/dev/null
+          grep --fixed-strings 'register_owner "$owner_pid" "$watch_cwd"' "$daemon" >/dev/null
+          grep --fixed-strings 'for owner_file in "$owners_dir"/*; do' "$runner" >/dev/null
+          grep --fixed-strings '[[ "$active_owners" -gt 0 ]] || break' "$runner" >/dev/null
+          if grep --fixed-strings 'owner.pid' "$daemon" "$runner" >/dev/null; then
+            exit 1
+          fi
           grep --fixed-strings 'findmnt --raw --noheadings --output TARGET' "$runner" >/dev/null
           grep --fixed-strings 'umount --lazy "$mount_target"' "$runner" >/dev/null
           test "$(grep --count --fixed-strings 'unmount_tree "$daemon_dir"' "$runner")" -eq 2

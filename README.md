@@ -12,9 +12,9 @@ Install Nix with flakes enabled. Enter the development environment:
 nix develop
 ```
 
-The shell provides two separate container runtimes. `podman` runs rootless without setup or authorization. The `docker` client connects to a worktree-local Docker daemon started directly by the shell, not by a systemd unit. Starting that rootful daemon asks for wheel authorization. The sanitized worktree directory name identifies its socket, process files, network bridge, and storage under `/run/user/$UID`; for example, `main` uses `agent-sandbox-docker-main`. Stable, readable names let users find stale resources and let the next activation reap state left by an interrupted shell.
+The shell provides two separate container runtimes. `podman` runs rootless without setup or authorization. The `docker` client connects to a worktree-local Docker daemon that the shell starts directly, not through a systemd unit. Starting this rootful daemon asks for wheel authorization. All active shells in one worktree share the daemon. The clean worktree directory name identifies its socket, process files, network bridge, and storage. Runtime files are under `/run/user/$UID`, and image storage is under `/var/tmp`. For example, `main` uses `agent-sandbox-docker-main`. This stable name helps users find stale resources.
 
-With nix-direnv installed, `direnv allow` activates the same environment when entering the repository. Leaving the worktree or closing its shell stops the Docker daemon and removes its runtime resources. A new activation for the same worktree replaces any stale daemon before exporting `DOCKER_HOST` and `DOCKER_SOCK`. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` when only rootless Podman is needed.
+With nix-direnv installed, `direnv allow` activates the same environment when entering the repository. The daemon stops and removes its runtime resources after the last registered shell leaves the worktree or closes. A new activation reuses a healthy daemon and replaces a stale daemon before it exports `DOCKER_HOST` and `DOCKER_SOCK`. Set `AGENT_SANDBOX_SKIP_DOCKER_DAEMON=1` when only rootless Podman is needed.
 
 ## Build and check
 
