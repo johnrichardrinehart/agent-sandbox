@@ -109,6 +109,19 @@ and executes a command. It checks response contents and exits on the first
 failed command. `nix run .#exercise-image` provides the same script as a Nix
 application.
 
+After the developer Compose environment is running, users can also inspect
+the reflected services and check health directly:
+
+```console
+docker compose -f docker-compose-dev.yaml up --build
+grpcurl -plaintext localhost:8080 list
+grpcurl -plaintext localhost:8080 grpc.health.v1.Health/Check
+```
+
+The first command starts the environment. The `list` command should show the
+health, reflection, command, and filesystem services. The health check should
+return `"status": "SERVING"`.
+
 ## NixOS VM integration test
 
 If `nix` is on `PATH`, build and run the complete VM test with:
