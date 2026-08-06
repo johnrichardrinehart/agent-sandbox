@@ -1,0 +1,7 @@
+# Project agent instructions
+
+## CI monitoring
+
+- Limit each wait for a queued CI run to 30 seconds unless the run starts or otherwise makes progress.
+- When GitHub has no available runner, record the run ID, status, and URL, then continue independent work instead of polling indefinitely.
+- Recheck pending runs after other work completes.
